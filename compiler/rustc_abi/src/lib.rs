@@ -329,19 +329,19 @@ impl TargetDataLayout {
                 [p] if p.starts_with('P') => {
                     dl.instruction_address_space = parse_address_space(&p[1..], "P")?
                 }
-                ["a", ref a @ ..] => dl.aggregate_align = parse_align(a, "a")?,
-                ["f16", ref a @ ..] => dl.f16_align = parse_align(a, "f16")?,
-                ["f32", ref a @ ..] => dl.f32_align = parse_align(a, "f32")?,
-                ["f64", ref a @ ..] => dl.f64_align = parse_align(a, "f64")?,
-                ["f128", ref a @ ..] => dl.f128_align = parse_align(a, "f128")?,
+                ["a", a @ ..] => dl.aggregate_align = parse_align(a, "a")?,
+                ["f16", a @ ..] => dl.f16_align = parse_align(a, "f16")?,
+                ["f32", a @ ..] => dl.f32_align = parse_align(a, "f32")?,
+                ["f64", a @ ..] => dl.f64_align = parse_align(a, "f64")?,
+                ["f128", a @ ..] => dl.f128_align = parse_align(a, "f128")?,
                 // FIXME(erikdesjardins): we should be parsing nonzero address spaces
                 // this will require replacing TargetDataLayout::{pointer_size,pointer_align}
                 // with e.g. `fn pointer_size_in(AddressSpace)`
-                [p @ "p", s, ref a @ ..] | [p @ "p0", s, ref a @ ..] => {
+                [p @ "p", s, a @ ..] | [p @ "p0", s, a @ ..] => {
                     dl.pointer_size = parse_size(s, p)?;
                     dl.pointer_align = parse_align(a, p)?;
                 }
-                [s, ref a @ ..] if s.starts_with('i') => {
+                [s, a @ ..] if s.starts_with('i') => {
                     let Ok(bits) = s[1..].parse::<u64>() else {
                         parse_size(&s[1..], "i")?; // For the user error.
                         continue;
@@ -362,7 +362,7 @@ impl TargetDataLayout {
                         dl.i128_align = a;
                     }
                 }
-                [s, ref a @ ..] if s.starts_with('v') => {
+                [s, a @ ..] if s.starts_with('v') => {
                     let v_size = parse_size(&s[1..], "v")?;
                     let a = parse_align(a, s)?;
                     if let Some(v) = dl.vector_align.iter_mut().find(|v| v.0 == v_size) {
@@ -408,16 +408,21 @@ impl TargetDataLayout {
         }
     }
 
+    /// psABI-mandated alignment for a vector type, if any
     #[inline]
-    pub fn vector_align(&self, vec_size: Size) -> AbiAndPrefAlign {
-        for &(size, align) in &self.vector_align {
-            if size == vec_size {
-                return align;
-            }
-        }
-        // Default to natural alignment, which is what LLVM does.
-        // That is, use the size, rounded up to a power of 2.
-        AbiAndPrefAlign::new(Align::from_bytes(vec_size.bytes().next_power_of_two()).unwrap())
+    fn cabi_vector_align(&self, vec_size: Size) -> Option<AbiAndPrefAlign> {
+        self.vector_align
+            .iter()
+            .find(|(size, _align)| *size == vec_size)
+            .map(|(_size, align)| *align)
+    }
+
+    /// an alignment resembling the one LLVM would pick for a vector
+    #[inline]
+    pub fn llvmlike_vector_align(&self, vec_size: Size) -> AbiAndPrefAlign {
+        self.cabi_vector_align(vec_size).unwrap_or(AbiAndPrefAlign::new(
+            Align::from_bytes(vec_size.bytes().next_power_of_two()).unwrap(),
+        ))
     }
 }
 
@@ -810,20 +815,19 @@ impl Align {
         self.bits().try_into().unwrap()
     }
 
-    /// Computes the best alignment possible for the given offset
-    /// (the largest power of two that the offset is a multiple of).
+    /// Obtain the greatest factor of `size` that is an alignment
+    /// (the largest power of two the Size is a multiple of).
     ///
-    /// N.B., for an offset of `0`, this happens to return `2^64`.
+    /// Note that all numbers are factors of 0
     #[inline]
-    pub fn max_for_offset(offset: Size) -> Align {
-        Align { pow2: offset.bytes().trailing_zeros() as u8 }
+    pub fn max_aligned_factor(size: Size) -> Align {
+        Align { pow2: size.bytes().trailing_zeros() as u8 }
     }
 
-    /// Lower the alignment, if necessary, such that the given offset
-    /// is aligned to it (the offset is a multiple of the alignment).
+    /// Reduces Align to an aligned factor of `size`.
     #[inline]
-    pub fn restrict_for_offset(self, offset: Size) -> Align {
-        self.min(Align::max_for_offset(offset))
+    pub fn restrict_for_offset(self, size: Size) -> Align {
+        self.min(Align::max_aligned_factor(size))
     }
 }
 
@@ -1455,37 +1459,38 @@ impl BackendRepr {
         matches!(*self, BackendRepr::Scalar(s) if s.is_bool())
     }
 
-    /// Returns the fixed alignment of this ABI, if any is mandated.
-    pub fn inherent_align<C: HasDataLayout>(&self, cx: &C) -> Option<AbiAndPrefAlign> {
-        Some(match *self {
-            BackendRepr::Scalar(s) => s.align(cx),
-            BackendRepr::ScalarPair(s1, s2) => s1.align(cx).max(s2.align(cx)),
-            BackendRepr::Vector { element, count } => {
-                cx.data_layout().vector_align(element.size(cx) * count)
-            }
-            BackendRepr::Memory { .. } => return None,
-        })
+    /// The psABI alignment for a `Scalar` or `ScalarPair`
+    ///
+    /// `None` for other variants.
+    pub fn scalar_align<C: HasDataLayout>(&self, cx: &C) -> Option<Align> {
+        match *self {
+            BackendRepr::Scalar(s) => Some(s.align(cx).abi),
+            BackendRepr::ScalarPair(s1, s2) => Some(s1.align(cx).max(s2.align(cx)).abi),
+            // The align of a Vector can vary in surprising ways
+            BackendRepr::Vector { .. } | BackendRepr::Memory { .. } => None,
+        }
     }
 
-    /// Returns the fixed size of this ABI, if any is mandated.
-    pub fn inherent_size<C: HasDataLayout>(&self, cx: &C) -> Option<Size> {
-        Some(match *self {
-            BackendRepr::Scalar(s) => {
-                // No padding in scalars.
-                s.size(cx)
-            }
+    /// The psABI size for a `Scalar` or `ScalarPair`
+    ///
+    /// `None` for other variants
+    pub fn scalar_size<C: HasDataLayout>(&self, cx: &C) -> Option<Size> {
+        match *self {
+            // No padding in scalars.
+            BackendRepr::Scalar(s) => Some(s.size(cx)),
+            // May have some padding between the pair.
             BackendRepr::ScalarPair(s1, s2) => {
-                // May have some padding between the pair.
                 let field2_offset = s1.size(cx).align_to(s2.align(cx).abi);
-                (field2_offset + s2.size(cx)).align_to(self.inherent_align(cx)?.abi)
+                let size = (field2_offset + s2.size(cx)).align_to(
+                    self.scalar_align(cx)
+                        // We absolutely must have an answer here or everything is FUBAR.
+                        .unwrap(),
+                );
+                Some(size)
             }
-            BackendRepr::Vector { element, count } => {
-                // No padding in vectors, except possibly for trailing padding
-                // to make the size a multiple of align (e.g. for vectors of size 3).
-                (element.size(cx) * count).align_to(self.inherent_align(cx)?.abi)
-            }
-            BackendRepr::Memory { .. } => return None,
-        })
+            // The size of a Vector can vary in surprising ways
+            BackendRepr::Vector { .. } | BackendRepr::Memory { .. } => None,
+        }
     }
 
     /// Discard validity range information and allow undef.
@@ -1802,7 +1807,7 @@ where
             variants,
             max_repr_align,
             unadjusted_abi_align,
-            ref randomization_seed,
+            randomization_seed,
         } = self;
         f.debug_struct("Layout")
             .field("size", size)
