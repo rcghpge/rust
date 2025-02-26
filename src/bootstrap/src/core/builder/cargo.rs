@@ -285,10 +285,7 @@ impl Cargo {
 
         // Ignore linker warnings for now. These are complicated to fix and don't affect the build.
         // FIXME: we should really investigate these...
-        // cfg(bootstrap)
-        if compiler.stage != 0 {
-            self.rustflags.arg("-Alinker-messages");
-        }
+        self.rustflags.arg("-Alinker-messages");
 
         // Throughout the build Cargo can execute a number of build scripts
         // compiling C/C++ code and we need to pass compilers, archivers, flags, etc
@@ -779,6 +776,12 @@ impl Builder<'_> {
             Mode::Codegen => metadata.push_str("codegen"),
             _ => {}
         }
+        // `rustc_driver`'s version number is always `0.0.0`, which can cause linker search path
+        // problems on side-by-side installs because we don't include the version number of the
+        // `rustc_driver` being built. This can cause builds of different version numbers to produce
+        // `librustc_driver*.so` artifacts that end up with identical filename hashes.
+        metadata.push_str(&self.version);
+
         cargo.env("__CARGO_DEFAULT_LIB_METADATA", &metadata);
 
         if cmd_kind == Kind::Clippy {
@@ -1071,10 +1074,7 @@ impl Builder<'_> {
 
         if mode == Mode::Rustc {
             rustflags.arg("-Wrustc::internal");
-            // cfg(bootstrap) - remove this check when lint is in bootstrap compiler
-            if stage != 0 {
-                rustflags.arg("-Drustc::symbol_intern_string_literal");
-            }
+            rustflags.arg("-Drustc::symbol_intern_string_literal");
             // FIXME(edition_2024): Change this to `-Wrust_2024_idioms` when all
             // of the individual lints are satisfied.
             rustflags.arg("-Wkeyword_idents_2024");

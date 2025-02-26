@@ -1644,6 +1644,55 @@ impl fmt::Display for StackProtector {
     }
 }
 
+#[derive(PartialEq, Clone, Debug)]
+pub enum BinaryFormat {
+    Coff,
+    Elf,
+    MachO,
+    Wasm,
+    Xcoff,
+}
+
+impl BinaryFormat {
+    /// Returns [`object::BinaryFormat`] for given `BinaryFormat`
+    pub fn to_object(&self) -> object::BinaryFormat {
+        match self {
+            Self::Coff => object::BinaryFormat::Coff,
+            Self::Elf => object::BinaryFormat::Elf,
+            Self::MachO => object::BinaryFormat::MachO,
+            Self::Wasm => object::BinaryFormat::Wasm,
+            Self::Xcoff => object::BinaryFormat::Xcoff,
+        }
+    }
+}
+
+impl FromStr for BinaryFormat {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "coff" => Ok(Self::Coff),
+            "elf" => Ok(Self::Elf),
+            "mach-o" => Ok(Self::MachO),
+            "wasm" => Ok(Self::Wasm),
+            "xcoff" => Ok(Self::Xcoff),
+            _ => Err(()),
+        }
+    }
+}
+
+impl ToJson for BinaryFormat {
+    fn to_json(&self) -> Json {
+        match self {
+            Self::Coff => "coff",
+            Self::Elf => "elf",
+            Self::MachO => "mach-o",
+            Self::Wasm => "wasm",
+            Self::Xcoff => "xcoff",
+        }
+        .to_json()
+    }
+}
+
 macro_rules! supported_targets {
     ( $(($tuple:literal, $module:ident),)+ ) => {
         mod targets {
@@ -2381,6 +2430,8 @@ pub struct TargetOptions {
     pub is_like_wasm: bool,
     /// Whether a target toolchain is like Android, implying a Linux kernel and a Bionic libc
     pub is_like_android: bool,
+    /// Target's binary file format. Defaults to BinaryFormat::Elf
+    pub binary_format: BinaryFormat,
     /// Default supported version of DWARF on this platform.
     /// Useful because some platforms (osx, bsd) only want up to DWARF2.
     pub default_dwarf_version: u32,
@@ -2756,6 +2807,7 @@ impl Default for TargetOptions {
             is_like_msvc: false,
             is_like_wasm: false,
             is_like_android: false,
+            binary_format: BinaryFormat::Elf,
             default_dwarf_version: 4,
             allows_weak_linkage: true,
             has_rpath: false,
@@ -2862,20 +2914,35 @@ impl Target {
             // On Windows, `extern "system"` behaves like msvc's `__stdcall`.
             // `__stdcall` only applies on x86 and on non-variadic functions:
             // https://learn.microsoft.com/en-us/cpp/cpp/stdcall?view=msvc-170
-            System { unwind } if self.is_like_windows && self.arch == "x86" && !c_variadic => {
-                Stdcall { unwind }
+            System { unwind } => {
+                if self.is_like_windows && self.arch == "x86" && !c_variadic {
+                    Stdcall { unwind }
+                } else {
+                    C { unwind }
+                }
             }
-            System { unwind } => C { unwind },
-            EfiApi if self.arch == "arm" => Aapcs { unwind: false },
-            EfiApi if self.arch == "x86_64" => Win64 { unwind: false },
-            EfiApi => C { unwind: false },
+
+            EfiApi => {
+                if self.arch == "arm" {
+                    Aapcs { unwind: false }
+                } else if self.arch == "x86_64" {
+                    Win64 { unwind: false }
+                } else {
+                    C { unwind: false }
+                }
+            }
 
             // See commentary in `is_abi_supported`.
-            Stdcall { .. } | Thiscall { .. } if self.arch == "x86" => abi,
-            Stdcall { unwind } | Thiscall { unwind } => C { unwind },
-            Fastcall { .. } if self.arch == "x86" => abi,
-            Vectorcall { .. } if ["x86", "x86_64"].contains(&&self.arch[..]) => abi,
-            Fastcall { unwind } | Vectorcall { unwind } => C { unwind },
+            Stdcall { unwind } | Thiscall { unwind } | Fastcall { unwind } => {
+                if self.arch == "x86" { abi } else { C { unwind } }
+            }
+            Vectorcall { unwind } => {
+                if ["x86", "x86_64"].contains(&&*self.arch) {
+                    abi
+                } else {
+                    C { unwind }
+                }
+            }
 
             // The Windows x64 calling convention we use for `extern "Rust"`
             // <https://learn.microsoft.com/en-us/cpp/build/x64-software-conventions#register-volatility-and-preservation>
