@@ -122,6 +122,7 @@ pub mod normalize_erasing_regions;
 pub mod pattern;
 pub mod print;
 pub mod relate;
+pub mod significant_drop_order;
 pub mod trait_def;
 pub mod util;
 pub mod visit;
@@ -989,12 +990,6 @@ impl<'tcx> ParamEnv<'tcx> {
     #[inline]
     pub fn new(caller_bounds: Clauses<'tcx>) -> Self {
         ParamEnv { caller_bounds }
-    }
-
-    /// Returns this same environment but with no caller bounds.
-    #[inline]
-    pub fn without_caller_bounds(self) -> Self {
-        Self::new(ListWithCachedTypeInfo::empty())
     }
 
     /// Creates a pair of param-env and value for use in queries.
