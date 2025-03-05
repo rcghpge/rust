@@ -182,19 +182,12 @@ jobs:
       - name: show the current environment
         run: src/ci/scripts/dump-environment.sh
 
-      # Temporary fix to unblock CI
-      # Remove the latest Windows SDK for 32-bit Windows MSVC builds.
-      # See issue https://github.com/rust-lang/rust/issues/137733 for more details.
-      - name: Remove Windows SDK 10.0.26100.0
-        shell: powershell
-        if: ${{ matrix.name == 'i686-msvc-1' || matrix.name == 'i686-msvc-2' || matrix.name == 'dist-i686-msvc' }}
+      # Pre-build citool before the following step uninstalls rustup
+      # Build is into the build directory, to avoid modifying sources
+      - name: build citool
         run: |
-          $kits = (Get-ItemProperty -path 'HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots').KitsRoot10
-          $sdk_version = "10.0.26100.0"
-
-          foreach ($kind in 'Bin', 'Lib', 'Include') {
-            Remove-Item -Force -Recurse $kits\$kind\$sdk_version -ErrorAction Continue
-          }
+          cd src/ci/citool
+          CARGO_TARGET_DIR=../../../build/citool cargo build
 
       - name: run the build
         # Redirect stderr to stdout to avoid reordering the two streams in the GHA logs.
@@ -231,6 +224,16 @@ jobs:
         # deploying artifacts from a dist builder if the variables are misconfigured,
         # erroring about invalid credentials instead.
         if: github.event_name == 'push' || env.DEPLOY == '1' || env.DEPLOY_ALT == '1'
+
+      - name: postprocess metrics into the summary
+        run: |
+          if [ -f build/metrics.json ]; then
+            ./build/citool/debug/citool postprocess-metrics build/metrics.json ${GITHUB_STEP_SUMMARY}
+          elif [ -f obj/build/metrics.json ]; then
+            ./build/citool/debug/citool postprocess-metrics obj/build/metrics.json ${GITHUB_STEP_SUMMARY}
+          else
+            echo "No metrics.json found"
+          fi
 
       - name: upload job metrics to DataDog
         if: needs.calculate_matrix.outputs.run_type != 'pr'
