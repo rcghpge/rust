@@ -83,6 +83,8 @@ jobs:
           CARGO_INCREMENTAL=0 cargo run calculate-job-matrix >> $GITHUB_OUTPUT
         id: jobs
   job:
+    # Skip this job entirely if the calculated matrix is empty ([], or missing)
+    if: ${{ needs.calculate_matrix.outputs.jobs != '' && needs.calculate_matrix.outputs.jobs != '[]' }}
     name: ${{ matrix.full_name }}
     needs: [ calculate_matrix ]
     runs-on: "${{ matrix.os }}"
