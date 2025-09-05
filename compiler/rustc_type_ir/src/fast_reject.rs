@@ -130,7 +130,7 @@ pub fn simplify_type<I: Interner>(
         ty::RawPtr(_, mutbl) => Some(SimplifiedType::Ptr(mutbl)),
         ty::Dynamic(trait_info, ..) => match trait_info.principal_def_id() {
             Some(principal_def_id) if !cx.trait_is_auto(principal_def_id) => {
-                Some(SimplifiedType::Trait(principal_def_id))
+                Some(SimplifiedType::Trait(principal_def_id.into()))
             }
             _ => Some(SimplifiedType::MarkerTraitObject),
         },
@@ -238,6 +238,10 @@ impl<I: Interner, const INSTANTIATE_LHS_WITH_INFER: bool, const INSTANTIATE_RHS_
 
     pub fn types_may_unify(self, lhs: I::Ty, rhs: I::Ty) -> bool {
         self.types_may_unify_inner(lhs, rhs, Self::STARTING_DEPTH)
+    }
+
+    pub fn types_may_unify_with_depth(self, lhs: I::Ty, rhs: I::Ty, depth_limit: usize) -> bool {
+        self.types_may_unify_inner(lhs, rhs, depth_limit)
     }
 
     fn args_may_unify_inner(

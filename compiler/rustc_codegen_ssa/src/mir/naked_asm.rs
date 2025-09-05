@@ -1,6 +1,6 @@
 use rustc_abi::{BackendRepr, Float, Integer, Primitive, RegKind};
-use rustc_attr_data_structures::InstructionSetAttr;
-use rustc_middle::mir::mono::{Linkage, MonoItemData, Visibility};
+use rustc_hir::attrs::{InstructionSetAttr, Linkage};
+use rustc_middle::mir::mono::{MonoItemData, Visibility};
 use rustc_middle::mir::{InlineAsmOperand, START_BLOCK};
 use rustc_middle::ty::layout::{FnAbiOf, LayoutOf, TyAndLayout};
 use rustc_middle::ty::{Instance, Ty, TyCtxt, TypeVisitableExt};
@@ -128,15 +128,11 @@ fn prefix_and_suffix<'tcx>(
     let is_arm = tcx.sess.target.arch == "arm";
     let is_thumb = tcx.sess.unstable_target_features.contains(&sym::thumb_mode);
 
-    let attrs = tcx.codegen_fn_attrs(instance.def_id());
+    let attrs = tcx.codegen_instance_attrs(instance.def);
     let link_section = attrs.link_section.map(|symbol| symbol.as_str().to_string());
 
-    // function alignment can be set globally with the `-Zmin-function-alignment=<n>` flag;
-    // the alignment from a `#[repr(align(<n>))]` is used if it specifies a higher alignment.
-    // if no alignment is specified, an alignment of 4 bytes is used.
-    let min_function_alignment = tcx.sess.opts.unstable_opts.min_function_alignment;
-    let align_bytes =
-        Ord::max(min_function_alignment, attrs.alignment).map(|a| a.bytes()).unwrap_or(4);
+    // If no alignment is specified, an alignment of 4 bytes is used.
+    let align_bytes = attrs.alignment.map(|a| a.bytes()).unwrap_or(4);
 
     // In particular, `.arm` can also be written `.code 32` and `.thumb` as `.code 16`.
     let (arch_prefix, arch_suffix) = if is_arm {
@@ -205,7 +201,7 @@ fn prefix_and_suffix<'tcx>(
     let mut end = String::new();
     match asm_binary_format {
         BinaryFormat::Elf => {
-            let section = link_section.unwrap_or(format!(".text.{asm_name}"));
+            let section = link_section.unwrap_or_else(|| format!(".text.{asm_name}"));
 
             let progbits = match is_arm {
                 true => "%progbits",
@@ -239,7 +235,7 @@ fn prefix_and_suffix<'tcx>(
             }
         }
         BinaryFormat::MachO => {
-            let section = link_section.unwrap_or("__TEXT,__text".to_string());
+            let section = link_section.unwrap_or_else(|| "__TEXT,__text".to_string());
             writeln!(begin, ".pushsection {},regular,pure_instructions", section).unwrap();
             writeln!(begin, ".balign {align_bytes}").unwrap();
             write_linkage(&mut begin).unwrap();
@@ -256,7 +252,7 @@ fn prefix_and_suffix<'tcx>(
             }
         }
         BinaryFormat::Coff => {
-            let section = link_section.unwrap_or(format!(".text.{asm_name}"));
+            let section = link_section.unwrap_or_else(|| format!(".text.{asm_name}"));
             writeln!(begin, ".pushsection {},\"xr\"", section).unwrap();
             writeln!(begin, ".balign {align_bytes}").unwrap();
             write_linkage(&mut begin).unwrap();
@@ -273,7 +269,7 @@ fn prefix_and_suffix<'tcx>(
             }
         }
         BinaryFormat::Wasm => {
-            let section = link_section.unwrap_or(format!(".text.{asm_name}"));
+            let section = link_section.unwrap_or_else(|| format!(".text.{asm_name}"));
 
             writeln!(begin, ".section {section},\"\",@").unwrap();
             // wasm functions cannot be aligned, so skip
@@ -330,7 +326,7 @@ fn prefix_and_suffix<'tcx>(
 fn wasm_functype<'tcx>(tcx: TyCtxt<'tcx>, fn_abi: &FnAbi<'tcx, Ty<'tcx>>) -> String {
     let mut signature = String::with_capacity(64);
 
-    let ptr_type = match tcx.data_layout.pointer_size.bits() {
+    let ptr_type = match tcx.data_layout.pointer_size().bits() {
         32 => "i32",
         64 => "i64",
         other => bug!("wasm pointer size cannot be {other} bits"),

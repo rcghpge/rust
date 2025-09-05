@@ -94,8 +94,8 @@ impl<T: Sized> NonNull<T> {
     /// For more details, see the equivalent method on a raw pointer, [`ptr::without_provenance_mut`].
     ///
     /// This is a [Strict Provenance][crate::ptr#strict-provenance] API.
-    #[stable(feature = "nonnull_provenance", since = "CURRENT_RUSTC_VERSION")]
-    #[rustc_const_stable(feature = "nonnull_provenance", since = "CURRENT_RUSTC_VERSION")]
+    #[stable(feature = "nonnull_provenance", since = "1.89.0")]
+    #[rustc_const_stable(feature = "nonnull_provenance", since = "1.89.0")]
     #[must_use]
     #[inline]
     pub const fn without_provenance(addr: NonZero<usize>) -> Self {
@@ -109,10 +109,10 @@ impl<T: Sized> NonNull<T> {
     /// This is useful for initializing types which lazily allocate, like
     /// `Vec::new` does.
     ///
-    /// Note that the pointer value may potentially represent a valid pointer to
-    /// a `T`, which means this must not be used as a "not yet initialized"
-    /// sentinel value. Types that lazily allocate must track initialization by
-    /// some other means.
+    /// Note that the address of the returned pointer may potentially
+    /// be that of a valid pointer, which means this must not be used
+    /// as a "not yet initialized" sentinel value.
+    /// Types that lazily allocate must track initialization by some other means.
     ///
     /// # Examples
     ///
@@ -138,7 +138,7 @@ impl<T: Sized> NonNull<T> {
     /// For more details, see the equivalent method on a raw pointer, [`ptr::with_exposed_provenance_mut`].
     ///
     /// This is an [Exposed Provenance][crate::ptr#exposed-provenance] API.
-    #[stable(feature = "nonnull_provenance", since = "CURRENT_RUSTC_VERSION")]
+    #[stable(feature = "nonnull_provenance", since = "1.89.0")]
     #[inline]
     pub fn with_exposed_provenance(addr: NonZero<usize>) -> Self {
         // SAFETY: we know `addr` is non-zero.
@@ -192,6 +192,13 @@ impl<T: Sized> NonNull<T> {
         // SAFETY: the caller must guarantee that `self` meets all the
         // requirements for a reference.
         unsafe { &mut *self.cast().as_ptr() }
+    }
+
+    /// Casts from a pointer-to-`T` to a pointer-to-`[T; N]`.
+    #[inline]
+    #[unstable(feature = "ptr_cast_array", issue = "144514")]
+    pub const fn cast_array<const N: usize>(self) -> NonNull<[T; N]> {
+        self.cast()
     }
 }
 
@@ -269,8 +276,8 @@ impl<T: PointeeSized> NonNull<T> {
     }
 
     /// Converts a reference to a `NonNull` pointer.
-    #[stable(feature = "non_null_from_ref", since = "CURRENT_RUSTC_VERSION")]
-    #[rustc_const_stable(feature = "non_null_from_ref", since = "CURRENT_RUSTC_VERSION")]
+    #[stable(feature = "non_null_from_ref", since = "1.89.0")]
+    #[rustc_const_stable(feature = "non_null_from_ref", since = "1.89.0")]
     #[inline]
     pub const fn from_ref(r: &T) -> Self {
         // SAFETY: A reference cannot be null.
@@ -278,8 +285,8 @@ impl<T: PointeeSized> NonNull<T> {
     }
 
     /// Converts a mutable reference to a `NonNull` pointer.
-    #[stable(feature = "non_null_from_ref", since = "CURRENT_RUSTC_VERSION")]
-    #[rustc_const_stable(feature = "non_null_from_ref", since = "CURRENT_RUSTC_VERSION")]
+    #[stable(feature = "non_null_from_ref", since = "1.89.0")]
+    #[rustc_const_stable(feature = "non_null_from_ref", since = "1.89.0")]
     #[inline]
     pub const fn from_mut(r: &mut T) -> Self {
         // SAFETY: A mutable reference cannot be null.
@@ -335,7 +342,7 @@ impl<T: PointeeSized> NonNull<T> {
     /// For more details, see the equivalent method on a raw pointer, [`pointer::expose_provenance`].
     ///
     /// This is an [Exposed Provenance][crate::ptr#exposed-provenance] API.
-    #[stable(feature = "nonnull_provenance", since = "CURRENT_RUSTC_VERSION")]
+    #[stable(feature = "nonnull_provenance", since = "1.89.0")]
     pub fn expose_provenance(self) -> NonZero<usize> {
         // SAFETY: The pointer is guaranteed by the type to be non-null,
         // meaning that the address will be non-zero.
@@ -497,7 +504,7 @@ impl<T: PointeeSized> NonNull<T> {
         unsafe { NonNull { pointer: self.as_ptr() as *mut U } }
     }
 
-    /// Try to cast to a pointer of another type by checking aligment.
+    /// Try to cast to a pointer of another type by checking alignment.
     ///
     /// If the pointer is properly aligned to the target type, it will be
     /// cast to the target type. Otherwise, `None` is returned.
@@ -1357,6 +1364,28 @@ impl<T: PointeeSized> NonNull<T> {
     }
 }
 
+impl<T> NonNull<T> {
+    /// Casts from a type to its maybe-uninitialized version.
+    #[must_use]
+    #[inline(always)]
+    #[unstable(feature = "cast_maybe_uninit", issue = "145036")]
+    pub const fn cast_uninit(self) -> NonNull<MaybeUninit<T>> {
+        self.cast()
+    }
+}
+impl<T> NonNull<MaybeUninit<T>> {
+    /// Casts from a maybe-uninitialized type to its initialized version.
+    ///
+    /// This is always safe, since UB can only occur if the pointer is read
+    /// before being initialized.
+    #[must_use]
+    #[inline(always)]
+    #[unstable(feature = "cast_maybe_uninit", issue = "145036")]
+    pub const fn cast_init(self) -> NonNull<T> {
+        self.cast()
+    }
+}
+
 impl<T> NonNull<[T]> {
     /// Creates a non-null raw slice from a thin pointer and a length.
     ///
@@ -1597,10 +1626,11 @@ impl<T> NonNull<[T]> {
     /// }
     /// ```
     #[unstable(feature = "slice_ptr_get", issue = "74265")]
+    #[rustc_const_unstable(feature = "const_index", issue = "143775")]
     #[inline]
-    pub unsafe fn get_unchecked_mut<I>(self, index: I) -> NonNull<I::Output>
+    pub const unsafe fn get_unchecked_mut<I>(self, index: I) -> NonNull<I::Output>
     where
-        I: SliceIndex<[T]>,
+        I: [const] SliceIndex<[T]>,
     {
         // SAFETY: the caller ensures that `self` is dereferenceable and `index` in-bounds.
         // As a consequence, the resulting pointer cannot be null.
@@ -1627,9 +1657,6 @@ impl<T: PointeeSized, U: PointeeSized> DispatchFromDyn<NonNull<U>> for NonNull<T
 
 #[stable(feature = "pin", since = "1.33.0")]
 unsafe impl<T: PointeeSized> PinCoerceUnsized for NonNull<T> {}
-
-#[unstable(feature = "pointer_like_trait", issue = "none")]
-impl<T> core::marker::PointerLike for NonNull<T> {}
 
 #[stable(feature = "nonnull", since = "1.25.0")]
 impl<T: PointeeSized> fmt::Debug for NonNull<T> {
@@ -1684,7 +1711,8 @@ impl<T: PointeeSized> hash::Hash for NonNull<T> {
 }
 
 #[unstable(feature = "ptr_internals", issue = "none")]
-impl<T: PointeeSized> From<Unique<T>> for NonNull<T> {
+#[rustc_const_unstable(feature = "const_convert", issue = "143773")]
+impl<T: PointeeSized> const From<Unique<T>> for NonNull<T> {
     #[inline]
     fn from(unique: Unique<T>) -> Self {
         unique.as_non_null_ptr()
@@ -1692,7 +1720,8 @@ impl<T: PointeeSized> From<Unique<T>> for NonNull<T> {
 }
 
 #[stable(feature = "nonnull", since = "1.25.0")]
-impl<T: PointeeSized> From<&mut T> for NonNull<T> {
+#[rustc_const_unstable(feature = "const_convert", issue = "143773")]
+impl<T: PointeeSized> const From<&mut T> for NonNull<T> {
     /// Converts a `&mut T` to a `NonNull<T>`.
     ///
     /// This conversion is safe and infallible since references cannot be null.
@@ -1703,7 +1732,8 @@ impl<T: PointeeSized> From<&mut T> for NonNull<T> {
 }
 
 #[stable(feature = "nonnull", since = "1.25.0")]
-impl<T: PointeeSized> From<&T> for NonNull<T> {
+#[rustc_const_unstable(feature = "const_convert", issue = "143773")]
+impl<T: PointeeSized> const From<&T> for NonNull<T> {
     /// Converts a `&T` to a `NonNull<T>`.
     ///
     /// This conversion is safe and infallible since references cannot be null.

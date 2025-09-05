@@ -51,8 +51,6 @@ enum GetSafeTransmuteErrorAndReason {
     Error { err_msg: String, safe_transmute_explanation: Option<String> },
 }
 
-struct UnsatisfiedConst(pub bool);
-
 /// Crude way of getting back an `Expr` from a `Span`.
 pub struct FindExprBySpan<'hir> {
     pub span: Span,
@@ -453,7 +451,7 @@ pub fn report_dyn_incompatibility<'tcx>(
     let trait_str = tcx.def_path_str(trait_def_id);
     let trait_span = tcx.hir_get_if_local(trait_def_id).and_then(|node| match node {
         hir::Node::Item(item) => match item.kind {
-            hir::ItemKind::Trait(_, _, ident, ..) | hir::ItemKind::TraitAlias(ident, _, _) => {
+            hir::ItemKind::Trait(_, _, _, ident, ..) | hir::ItemKind::TraitAlias(ident, _, _) => {
                 Some(ident.span)
             }
             _ => unreachable!(),

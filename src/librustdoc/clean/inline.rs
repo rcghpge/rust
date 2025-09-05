@@ -6,7 +6,7 @@ use std::sync::Arc;
 use rustc_data_structures::fx::FxHashSet;
 use rustc_hir as hir;
 use rustc_hir::Mutability;
-use rustc_hir::def::{DefKind, Res};
+use rustc_hir::def::{DefKind, MacroKinds, Res};
 use rustc_hir::def_id::{DefId, DefIdSet, LocalDefId, LocalModDefId};
 use rustc_metadata::creader::{CStore, LoadedMacro};
 use rustc_middle::ty::fast_reject::SimplifiedType;
@@ -137,13 +137,16 @@ pub(crate) fn try_inline(
                 clean::ConstantItem(Box::new(ct))
             })
         }
-        Res::Def(DefKind::Macro(kind), did) => {
-            let mac = build_macro(cx, did, name, kind);
+        Res::Def(DefKind::Macro(kinds), did) => {
+            let mac = build_macro(cx, did, name, kinds);
 
-            let type_kind = match kind {
-                MacroKind::Bang => ItemType::Macro,
-                MacroKind::Attr => ItemType::ProcAttribute,
-                MacroKind::Derive => ItemType::ProcDerive,
+            // FIXME: handle attributes and derives that aren't proc macros, and macros with
+            // multiple kinds
+            let type_kind = match kinds {
+                MacroKinds::BANG => ItemType::Macro,
+                MacroKinds::ATTR => ItemType::ProcAttribute,
+                MacroKinds::DERIVE => ItemType::ProcDerive,
+                _ => todo!("Handle macros with multiple kinds"),
             };
             record_extern_fqn(cx, did, type_kind);
             mac
@@ -152,8 +155,14 @@ pub(crate) fn try_inline(
     };
 
     cx.inlined.insert(did.into());
-    let mut item =
-        crate::clean::generate_item_with_correct_attrs(cx, kind, did, name, import_def_id, None);
+    let mut item = crate::clean::generate_item_with_correct_attrs(
+        cx,
+        kind,
+        did,
+        name,
+        import_def_id.as_slice(),
+        None,
+    );
     // The visibility needs to reflect the one from the reexport and not from the "source" DefId.
     item.inner.inline_stmt_id = import_def_id;
     ret.push(item);
@@ -211,7 +220,7 @@ pub(crate) fn try_inline_glob(
 }
 
 pub(crate) fn load_attrs<'hir>(cx: &DocContext<'hir>, did: DefId) -> &'hir [hir::Attribute] {
-    cx.tcx.get_attrs_unchecked(did)
+    cx.tcx.get_all_attrs(did)
 }
 
 pub(crate) fn item_relative_path(tcx: TyCtxt<'_>, def_id: DefId) -> Vec<Symbol> {
@@ -293,7 +302,7 @@ pub(super) fn build_function(cx: &mut DocContext<'_>, def_id: DefId) -> Box<clea
     let sig = cx.tcx.fn_sig(def_id).instantiate_identity();
     // The generics need to be cleaned before the signature.
     let mut generics = clean_ty_generics(cx, def_id);
-    let bound_vars = clean_bound_vars(sig.bound_vars());
+    let bound_vars = clean_bound_vars(sig.bound_vars(), cx);
 
     // At the time of writing early & late-bound params are stored separately in rustc,
     // namely in `generics.params` and `bound_vars` respectively.
@@ -493,7 +502,7 @@ pub(crate) fn build_impl(
             impl_
                 .items
                 .iter()
-                .map(|item| tcx.hir_impl_item(item.id))
+                .map(|&item| tcx.hir_impl_item(item))
                 .filter(|item| {
                     // Filter out impl items whose corresponding trait item has `doc(hidden)`
                     // not to document such impl items.
@@ -563,29 +572,29 @@ pub(crate) fn build_impl(
         super::build_deref_target_impls(cx, &trait_items, ret);
     }
 
-    // Return if the trait itself or any types of the generic parameters are doc(hidden).
-    let mut stack: Vec<&Type> = vec![&for_];
+    if !document_hidden {
+        // Return if the trait itself or any types of the generic parameters are doc(hidden).
+        let mut stack: Vec<&Type> = vec![&for_];
 
-    if let Some(did) = trait_.as_ref().map(|t| t.def_id())
-        && !document_hidden
-        && tcx.is_doc_hidden(did)
-    {
-        return;
-    }
-
-    if let Some(generics) = trait_.as_ref().and_then(|t| t.generics()) {
-        stack.extend(generics);
-    }
-
-    while let Some(ty) = stack.pop() {
-        if let Some(did) = ty.def_id(&cx.cache)
-            && !document_hidden
+        if let Some(did) = trait_.as_ref().map(|t| t.def_id())
             && tcx.is_doc_hidden(did)
         {
             return;
         }
-        if let Some(generics) = ty.generics() {
+
+        if let Some(generics) = trait_.as_ref().and_then(|t| t.generics()) {
             stack.extend(generics);
+        }
+
+        while let Some(ty) = stack.pop() {
+            if let Some(did) = ty.def_id(&cx.cache)
+                && tcx.is_doc_hidden(did)
+            {
+                return;
+            }
+            if let Some(generics) = ty.generics() {
+                stack.extend(generics);
+            }
         }
     }
 
@@ -743,22 +752,36 @@ fn build_macro(
     cx: &mut DocContext<'_>,
     def_id: DefId,
     name: Symbol,
-    macro_kind: MacroKind,
+    macro_kinds: MacroKinds,
 ) -> clean::ItemKind {
     match CStore::from_tcx(cx.tcx).load_macro_untracked(def_id, cx.tcx) {
-        LoadedMacro::MacroDef { def, .. } => match macro_kind {
-            MacroKind::Bang => clean::MacroItem(clean::Macro {
+        // FIXME: handle attributes and derives that aren't proc macros, and macros with multiple
+        // kinds
+        LoadedMacro::MacroDef { def, .. } => match macro_kinds {
+            MacroKinds::BANG => clean::MacroItem(clean::Macro {
                 source: utils::display_macro_source(cx, name, &def),
                 macro_rules: def.macro_rules,
             }),
-            MacroKind::Derive | MacroKind::Attr => {
-                clean::ProcMacroItem(clean::ProcMacro { kind: macro_kind, helpers: Vec::new() })
-            }
+            MacroKinds::DERIVE => clean::ProcMacroItem(clean::ProcMacro {
+                kind: MacroKind::Derive,
+                helpers: Vec::new(),
+            }),
+            MacroKinds::ATTR => clean::ProcMacroItem(clean::ProcMacro {
+                kind: MacroKind::Attr,
+                helpers: Vec::new(),
+            }),
+            _ => todo!("Handle macros with multiple kinds"),
         },
-        LoadedMacro::ProcMacro(ext) => clean::ProcMacroItem(clean::ProcMacro {
-            kind: ext.macro_kind(),
-            helpers: ext.helper_attrs,
-        }),
+        LoadedMacro::ProcMacro(ext) => {
+            // Proc macros can only have a single kind
+            let kind = match ext.macro_kinds() {
+                MacroKinds::BANG => MacroKind::Bang,
+                MacroKinds::ATTR => MacroKind::Attr,
+                MacroKinds::DERIVE => MacroKind::Derive,
+                _ => unreachable!(),
+            };
+            clean::ProcMacroItem(clean::ProcMacro { kind, helpers: ext.helper_attrs })
+        }
     }
 }
 

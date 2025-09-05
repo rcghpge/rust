@@ -149,7 +149,7 @@ pub const CONFIG_CHANGE_HISTORY: &[ChangeInfo] = &[
     ChangeInfo {
         change_id: 121976,
         severity: ChangeSeverity::Info,
-        summary: "A new `boostrap-cache-path` option has been introduced which can be utilized to modify the cache path for bootstrap.",
+        summary: "A new `bootstrap-cache-path` option has been introduced which can be utilized to modify the cache path for bootstrap.",
     },
     ChangeInfo {
         change_id: 122108,
@@ -404,7 +404,7 @@ pub const CONFIG_CHANGE_HISTORY: &[ChangeInfo] = &[
     ChangeInfo {
         change_id: 140438,
         severity: ChangeSeverity::Info,
-        summary: "Added a new option `rust.debug-assertions-tools` to control debug asssertions for tools.",
+        summary: "Added a new option `rust.debug-assertions-tools` to control debug assertions for tools.",
     },
     ChangeInfo {
         change_id: 140732,
@@ -425,5 +425,120 @@ pub const CONFIG_CHANGE_HISTORY: &[ChangeInfo] = &[
         change_id: 142379,
         severity: ChangeSeverity::Info,
         summary: "Added new option `tool.TOOL_NAME.features` to specify the features to compile a tool with",
+    },
+    ChangeInfo {
+        change_id: 142581,
+        severity: ChangeSeverity::Warning,
+        summary: "It is no longer possible to `x build` with stage 0. All build commands have to be on stage 1+.",
+    },
+    ChangeInfo {
+        change_id: 143175,
+        severity: ChangeSeverity::Info,
+        summary: "It is no longer possible to combine `rust.lld = true` with configuring external LLVM using `llvm.llvm-config`.",
+    },
+    ChangeInfo {
+        change_id: 143255,
+        severity: ChangeSeverity::Warning,
+        summary: "`rust.lld` is no longer enabled by default for the dist profile.",
+    },
+    ChangeInfo {
+        change_id: 143251,
+        severity: ChangeSeverity::Info,
+        summary: "Added new option `build.tidy-extra-checks` to specify a default value for the --extra-checks cli flag.",
+    },
+    ChangeInfo {
+        change_id: 143493,
+        severity: ChangeSeverity::Warning,
+        summary: "The `spellcheck:fix` tidy extra check argument has been removed, use `--bless` instead",
+    },
+    ChangeInfo {
+        change_id: 143048,
+        severity: ChangeSeverity::Warning,
+        summary: "The default check stage has been changed to 1. It is no longer possible to `x check` with stage 0. All check commands have to be on stage 1+. Bootstrap tools can now also only be checked for the host target.",
+    },
+    ChangeInfo {
+        change_id: 143577,
+        severity: ChangeSeverity::Warning,
+        summary: "`download-rustc` has been temporarily disabled for the library profile due to implementation bugs (see #142505).",
+    },
+    ChangeInfo {
+        change_id: 143398,
+        severity: ChangeSeverity::Info,
+        summary: "The --extra-checks flag now supports prefixing any check with `auto:` to only run it if relevant files are modified",
+    },
+    ChangeInfo {
+        change_id: 143785,
+        severity: ChangeSeverity::Info,
+        summary: "A --compile-time-deps flag has been added to reduce the time it takes rust-analyzer to start",
+    },
+    ChangeInfo {
+        change_id: 143733,
+        severity: ChangeSeverity::Info,
+        summary: "Option `tool.TOOL_NAME.features` now works on any subcommand, not just `build`.",
+    },
+    ChangeInfo {
+        change_id: 143630,
+        severity: ChangeSeverity::Warning,
+        summary: "The current `./x suggest` implementation has been removed due to it being quite broken and a lack of maintenance bandwidth, with no prejudice against re-implementing it in a more maintainable form.",
+    },
+    ChangeInfo {
+        change_id: 143926,
+        severity: ChangeSeverity::Warning,
+        summary: "Removed `rust.description` and `llvm.ccache` as it was deprecated in #137723 and #136941 long time ago.",
+    },
+    ChangeInfo {
+        change_id: 144675,
+        severity: ChangeSeverity::Warning,
+        summary: "Added `build.compiletest-allow-stage0` flag instead of `COMPILETEST_FORCE_STAGE0` env var, and reject running `compiletest` self tests against stage 0 rustc unless explicitly allowed.",
+    },
+    ChangeInfo {
+        change_id: 145011,
+        severity: ChangeSeverity::Warning,
+        summary: "It is no longer possible to `x doc` with stage 0. All doc commands have to be on stage 1+.",
+    },
+    ChangeInfo {
+        change_id: 145295,
+        severity: ChangeSeverity::Warning,
+        summary: "The names of stageN directories in the build directory have been consolidated with the new (post-stage-0-redesign) staging scheme. Some tools and binaries might be located in a different build directory than before.",
+    },
+    ChangeInfo {
+        change_id: 145131,
+        severity: ChangeSeverity::Warning,
+        summary: "It is no longer possible to `x clippy` with stage 0. All clippy commands have to be on stage 1+.",
+    },
+    ChangeInfo {
+        change_id: 145256,
+        severity: ChangeSeverity::Info,
+        summary: "Added `--test-codegen-backend` CLI option for tests",
+    },
+    ChangeInfo {
+        change_id: 145379,
+        severity: ChangeSeverity::Info,
+        summary: "Build/check now supports forwarding `--timings` flag to cargo.",
+    },
+    ChangeInfo {
+        change_id: 145472,
+        severity: ChangeSeverity::Warning,
+        summary: "It is no longer possible to `x dist` or `x install` with stage 0. All dist and install commands have to be on stage 1+.",
+    },
+    ChangeInfo {
+        change_id: 143689,
+        severity: ChangeSeverity::Info,
+        summary: "The `optimized-compiler-builtins` option now accepts a path to an existing compiler-rt builtins library.",
+    },
+    ChangeInfo {
+        change_id: 145876,
+        severity: ChangeSeverity::Info,
+        summary: "It is now possible to `check/build/dist` the standard stage 0 library if you use a stage0 rustc built from in-tree sources. This is useful for quickly cross-compiling the standard library. You have to enable build.local-rebuild for this to work.",
+    },
+    ChangeInfo {
+        change_id: 145663,
+        severity: ChangeSeverity::Warning,
+        summary: "It is no longer possible to `x test` with stage 0, except for running compiletest and opting into `build.compiletest-allow-stage0`.",
+    },
+    ChangeInfo {
+        change_id: 145976,
+        severity: ChangeSeverity::Info,
+        summary: "Added a new option `rust.break-on-ice` to control if internal compiler errors cause a debug break on Windows.",
     },
 ];

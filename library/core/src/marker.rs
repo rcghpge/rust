@@ -19,6 +19,9 @@ use crate::fmt::Debug;
 use crate::hash::{Hash, Hasher};
 use crate::pin::UnsafePinned;
 
+// NOTE: for consistent error messages between `core` and `minicore`, all `diagnostic` attributes
+// should be replicated exactly in `minicore` (if `minicore` defines the item).
+
 /// Implements a given marker trait for multiple types at the same time.
 ///
 /// The basic syntax looks like this:
@@ -135,8 +138,7 @@ unsafe impl<T: Sync + PointeeSized> Send for &T {}
 /// impl Bar for Impl { }
 ///
 /// let x: &dyn Foo = &Impl;    // OK
-/// // let y: &dyn Bar = &Impl; // error: the trait `Bar` cannot
-///                             // be made into an object
+/// // let y: &dyn Bar = &Impl; // error: the trait `Bar` cannot be made into an object
 /// ```
 ///
 /// [trait object]: ../../book/ch17-02-trait-objects.html
@@ -207,9 +209,14 @@ pub trait PointeeSized {
 ///   - `Trait` is dyn-compatible[^1].
 ///   - The type is sized.
 ///   - The type outlives `'a`.
+/// - Trait objects `dyn TraitA + AutoA... + 'a` implement `Unsize<dyn TraitB + AutoB... + 'b>`
+///    if all of these conditions are met:
+///   - `TraitB` is a supertrait of `TraitA`.
+///   - `AutoB...` is a subset of `AutoA...`.
+///   - `'a` outlives `'b`.
 /// - Structs `Foo<..., T1, ..., Tn, ...>` implement `Unsize<Foo<..., U1, ..., Un, ...>>`
-/// where any number of (type and const) parameters may be changed if all of these conditions
-/// are met:
+///   where any number of (type and const) parameters may be changed if all of these conditions
+///   are met:
 ///   - Only the last field of `Foo` has a type involving the parameters `T1`, ..., `Tn`.
 ///   - All other parameters of the struct are equal.
 ///   - `Field<T1, ..., Tn>: Unsize<Field<U1, ..., Un>>`, where `Field<...>` stands for the actual
@@ -855,7 +862,8 @@ impl<T: PointeeSized> Clone for PhantomData<T> {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<T: PointeeSized> Default for PhantomData<T> {
+#[rustc_const_unstable(feature = "const_default", issue = "143894")]
+impl<T: PointeeSized> const Default for PhantomData<T> {
     fn default() -> Self {
         Self
     }
@@ -1041,7 +1049,7 @@ marker_impls! {
 
 /// A marker for types that can be dropped.
 ///
-/// This should be used for `~const` bounds,
+/// This should be used for `[const]` bounds,
 /// as non-const bounds will always hold for every type.
 #[unstable(feature = "const_destruct", issue = "133214")]
 #[rustc_const_unstable(feature = "const_destruct", issue = "133214")]
@@ -1062,37 +1070,6 @@ pub trait Destruct {}
 #[rustc_deny_explicit_impl]
 #[rustc_do_not_implement_via_object]
 pub trait Tuple {}
-
-/// A marker for pointer-like types.
-///
-/// This trait can only be implemented for types that are certain to have
-/// the same size and alignment as a [`usize`] or [`*const ()`](pointer).
-/// To ensure this, there are special requirements on implementations
-/// of `PointerLike` (other than the already-provided implementations
-/// for built-in types):
-///
-/// * The type must have `#[repr(transparent)]`.
-/// * The type’s sole non-zero-sized field must itself implement `PointerLike`.
-#[unstable(feature = "pointer_like_trait", issue = "none")]
-#[lang = "pointer_like"]
-#[diagnostic::on_unimplemented(
-    message = "`{Self}` needs to have the same ABI as a pointer",
-    label = "`{Self}` needs to be a pointer-like type"
-)]
-#[rustc_do_not_implement_via_object]
-pub trait PointerLike {}
-
-marker_impls! {
-    #[unstable(feature = "pointer_like_trait", issue = "none")]
-    PointerLike for
-        isize,
-        usize,
-        {T} &T,
-        {T} &mut T,
-        {T} *const T,
-        {T} *mut T,
-        {T: PointerLike} crate::pin::Pin<T>,
-}
 
 /// A marker for types which can be used as types of `const` generic parameters.
 ///
@@ -1387,4 +1364,12 @@ pub macro CoercePointee($item:item) {
 #[doc(hidden)]
 pub trait CoercePointeeValidated {
     /* compiler built-in */
+}
+
+/// Allows value to be reborrowed as exclusive, creating a copy of the value
+/// that disables the source for reads and writes for the lifetime of the copy.
+#[lang = "reborrow"]
+#[unstable(feature = "reborrow", issue = "145612")]
+pub trait Reborrow {
+    // Empty.
 }

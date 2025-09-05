@@ -62,10 +62,9 @@ This API is completely unstable and subject to change.
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
 #![doc(rust_logo)]
 #![feature(assert_matches)]
-#![feature(coroutines)]
 #![feature(debug_closure_helpers)]
+#![feature(gen_blocks)]
 #![feature(if_let_guard)]
-#![feature(iter_from_coroutine)]
 #![feature(iter_intersperse)]
 #![feature(never_type)]
 #![feature(rustdoc_internals)]
@@ -83,7 +82,7 @@ mod coherence;
 mod collect;
 mod constrained_generic_params;
 mod delegation;
-mod errors;
+pub mod errors;
 pub mod hir_ty_lowering;
 pub mod hir_wf_check;
 mod impl_wf_check;
@@ -91,7 +90,7 @@ mod outlives;
 mod variance;
 
 pub use errors::NoVariantNamed;
-use rustc_abi::ExternAbi;
+use rustc_abi::{CVariadicStatus, ExternAbi};
 use rustc_hir::def::DefKind;
 use rustc_hir::lints::DelayedLint;
 use rustc_hir::{self as hir};
@@ -100,7 +99,6 @@ use rustc_middle::mir::interpret::GlobalId;
 use rustc_middle::query::Providers;
 use rustc_middle::ty::{self, Const, Ty, TyCtxt};
 use rustc_session::parse::feature_err;
-use rustc_span::symbol::sym;
 use rustc_span::{ErrorGuaranteed, Span};
 use rustc_trait_selection::traits;
 
@@ -109,60 +107,51 @@ use crate::hir_ty_lowering::{FeedConstTy, HirTyLowerer};
 
 rustc_fluent_macro::fluent_messages! { "../messages.ftl" }
 
-fn require_c_abi_if_c_variadic(
-    tcx: TyCtxt<'_>,
-    decl: &hir::FnDecl<'_>,
-    abi: ExternAbi,
-    span: Span,
-) {
-    // ABIs which can stably use varargs
-    if !decl.c_variadic || matches!(abi, ExternAbi::C { .. } | ExternAbi::Cdecl { .. }) {
+fn check_c_variadic_abi(tcx: TyCtxt<'_>, decl: &hir::FnDecl<'_>, abi: ExternAbi, span: Span) {
+    if !decl.c_variadic {
+        // Not even a variadic function.
         return;
     }
 
-    // ABIs with feature-gated stability
-    let extended_abi_support = tcx.features().extended_varargs_abi_support();
-    let extern_system_varargs = tcx.features().extern_system_varargs();
-
-    // If the feature gate has been enabled, we can stop here
-    if extern_system_varargs && let ExternAbi::System { .. } = abi {
-        return;
-    };
-    if extended_abi_support && abi.supports_varargs() {
-        return;
-    };
-
-    // Looks like we need to pick an error to emit.
-    // Is there any feature which we could have enabled to make this work?
-    let unstable_explain =
-        format!("C-variadic functions with the {abi} calling convention are unstable");
-    match abi {
-        ExternAbi::System { .. } => {
-            feature_err(&tcx.sess, sym::extern_system_varargs, span, unstable_explain)
+    match abi.supports_c_variadic() {
+        CVariadicStatus::Stable => {}
+        CVariadicStatus::NotSupported => {
+            tcx.dcx()
+                .create_err(errors::VariadicFunctionCompatibleConvention {
+                    span,
+                    convention: &format!("{abi}"),
+                })
+                .emit();
         }
-        abi if abi.supports_varargs() => {
-            feature_err(&tcx.sess, sym::extended_varargs_abi_support, span, unstable_explain)
+        CVariadicStatus::Unstable { feature } => {
+            if !tcx.features().enabled(feature) {
+                feature_err(
+                    &tcx.sess,
+                    feature,
+                    span,
+                    format!("C-variadic functions with the {abi} calling convention are unstable"),
+                )
+                .emit();
+            }
         }
-        _ => tcx.dcx().create_err(errors::VariadicFunctionCompatibleConvention {
-            span,
-            convention: &format!("{abi}"),
-        }),
     }
-    .emit();
 }
 
+/// Adds query implementations to the [Providers] vtable, see [`rustc_middle::query`]
 pub fn provide(providers: &mut Providers) {
     collect::provide(providers);
     coherence::provide(providers);
     check::provide(providers);
-    check_unused::provide(providers);
-    variance::provide(providers);
-    outlives::provide(providers);
-    hir_wf_check::provide(providers);
     *providers = Providers {
+        check_unused_traits: check_unused::check_unused_traits,
+        diagnostic_hir_wf_check: hir_wf_check::diagnostic_hir_wf_check,
+        inferred_outlives_crate: outlives::inferred_outlives_crate,
+        inferred_outlives_of: outlives::inferred_outlives_of,
         inherit_sig_for_delegation_item: delegation::inherit_sig_for_delegation_item,
         enforce_impl_non_lifetime_params_are_constrained:
             impl_wf_check::enforce_impl_non_lifetime_params_are_constrained,
+        crate_variances: variance::crate_variances,
+        variances_of: variance::variances_of,
         ..*providers
     };
 }

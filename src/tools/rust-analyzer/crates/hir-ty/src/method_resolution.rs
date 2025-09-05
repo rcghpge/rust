@@ -581,15 +581,15 @@ impl ReceiverAdjustments {
         }
         if self.unsize_array {
             ty = 'it: {
-                if let TyKind::Ref(m, l, inner) = ty.kind(Interner) {
-                    if let TyKind::Array(inner, _) = inner.kind(Interner) {
-                        break 'it TyKind::Ref(
-                            *m,
-                            l.clone(),
-                            TyKind::Slice(inner.clone()).intern(Interner),
-                        )
-                        .intern(Interner);
-                    }
+                if let TyKind::Ref(m, l, inner) = ty.kind(Interner)
+                    && let TyKind::Array(inner, _) = inner.kind(Interner)
+                {
+                    break 'it TyKind::Ref(
+                        *m,
+                        l.clone(),
+                        TyKind::Slice(inner.clone()).intern(Interner),
+                    )
+                    .intern(Interner);
                 }
                 // FIXME: report diagnostic if array unsizing happens without indirection.
                 ty
@@ -1302,7 +1302,7 @@ fn iterate_trait_method_candidates(
         // trait, but if we find out it doesn't, we'll skip the rest of the
         // iteration
         let mut known_implemented = false;
-        for &(_, item) in db.trait_items(t).items.iter() {
+        for &(_, item) in t.trait_items(db).items.iter() {
             // Don't pass a `visible_from_module` down to `is_valid_candidate`,
             // since only inherent methods should be included into visibility checking.
             let visible =
@@ -1429,7 +1429,7 @@ fn iterate_inherent_methods(
     ) -> ControlFlow<()> {
         let db = table.db;
         for t in traits {
-            let data = db.trait_items(t);
+            let data = t.trait_items(db);
             for &(_, item) in data.items.iter() {
                 // We don't pass `visible_from_module` as all trait items should be visible.
                 let visible = match is_valid_trait_method_candidate(
@@ -1549,11 +1549,11 @@ fn is_valid_impl_method_candidate(
             check_that!(receiver_ty.is_none());
             check_that!(name.is_none_or(|n| n == item_name));
 
-            if let Some(from_module) = visible_from_module {
-                if !db.assoc_visibility(c.into()).is_visible_from(db, from_module) {
-                    cov_mark::hit!(const_candidate_not_visible);
-                    return IsValidCandidate::NotVisible;
-                }
+            if let Some(from_module) = visible_from_module
+                && !db.assoc_visibility(c.into()).is_visible_from(db, from_module)
+            {
+                cov_mark::hit!(const_candidate_not_visible);
+                return IsValidCandidate::NotVisible;
             }
             let self_ty_matches = table.run_in_snapshot(|table| {
                 let expected_self_ty =
@@ -1638,11 +1638,11 @@ fn is_valid_impl_fn_candidate(
     let db = table.db;
     let data = db.function_signature(fn_id);
 
-    if let Some(from_module) = visible_from_module {
-        if !db.assoc_visibility(fn_id.into()).is_visible_from(db, from_module) {
-            cov_mark::hit!(autoderef_candidate_not_visible);
-            return IsValidCandidate::NotVisible;
-        }
+    if let Some(from_module) = visible_from_module
+        && !db.assoc_visibility(fn_id.into()).is_visible_from(db, from_module)
+    {
+        cov_mark::hit!(autoderef_candidate_not_visible);
+        return IsValidCandidate::NotVisible;
     }
     table.run_in_snapshot(|table| {
         let _p = tracing::info_span!("subst_for_def").entered();

@@ -1,7 +1,5 @@
 # Errors and lints
 
-<!-- toc -->
-
 A lot of effort has been put into making `rustc` have great error messages.
 This chapter is about how to emit compile errors and lints from the compiler.
 
@@ -553,7 +551,7 @@ compiler](#linting-early-in-the-compiler).
 
 
 [AST nodes]: the-parser.md
-[AST lowering]: ast-lowering.md
+[AST lowering]: ./hir/lowering.md
 [HIR nodes]: hir.md
 [MIR nodes]: mir/index.md
 [macro expansion]: macro-expansion.md

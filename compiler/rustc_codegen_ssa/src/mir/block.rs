@@ -5,6 +5,7 @@ use rustc_ast as ast;
 use rustc_ast::{InlineAsmOptions, InlineAsmTemplatePiece};
 use rustc_data_structures::packed::Pu128;
 use rustc_hir::lang_items::LangItem;
+use rustc_lint_defs::builtin::TAIL_CALL_TRACK_CALLER;
 use rustc_middle::mir::{self, AssertKind, InlineAsmMacro, SwitchTargets, UnwindTerminateReason};
 use rustc_middle::ty::layout::{HasTyCtxt, LayoutOf, ValidityRequirement};
 use rustc_middle::ty::print::{with_no_trimmed_paths, with_no_visible_paths};
@@ -33,6 +34,14 @@ use crate::{MemFlags, meth};
 enum MergingSucc {
     False,
     True,
+}
+
+/// Indicates to the call terminator codegen whether a call
+/// is a normal call or an explicit tail call.
+#[derive(Debug, PartialEq)]
+enum CallKind {
+    Normal,
+    Tail,
 }
 
 /// Used by `FunctionCx::codegen_terminator` for emitting common patterns
@@ -160,6 +169,7 @@ impl<'a, 'tcx> TerminatorCodegenHelper<'tcx> {
         mut unwind: mir::UnwindAction,
         lifetime_ends_after_call: &[(Bx::Value, Size)],
         instance: Option<Instance<'tcx>>,
+        kind: CallKind,
         mergeable_succ: bool,
     ) -> MergingSucc {
         let tcx = bx.tcx();
@@ -220,6 +230,11 @@ impl<'a, 'tcx> TerminatorCodegenHelper<'tcx> {
                 }
             }
         };
+
+        if kind == CallKind::Tail {
+            bx.tail_call(fn_ty, fn_attrs, fn_abi, fn_ptr, llargs, self.funclet(fx), instance);
+            return MergingSucc::False;
+        }
 
         if let Some(unwind_block) = unwind_block {
             let ret_llbb = if let Some((_, target)) = destination {
@@ -504,6 +519,9 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             match self.locals[mir::Local::from_usize(1 + va_list_arg_idx)] {
                 LocalRef::Place(va_list) => {
                     bx.va_end(va_list.val.llval);
+
+                    // Explicitly end the lifetime of the `va_list`, this matters for LLVM.
+                    bx.lifetime_end(va_list.val.llval, va_list.layout.size);
                 }
                 _ => bug!("C-variadic function must have a `VaList` place"),
             }
@@ -628,50 +646,6 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     virtual_drop,
                 )
             }
-            ty::Dynamic(_, _, ty::DynStar) => {
-                // IN THIS ARM, WE HAVE:
-                // ty = *mut (dyn* Trait)
-                // which is: *mut exists<T: sizeof(T) == sizeof(usize)> (T, Vtable<T: Trait>)
-                //
-                // args = [ * ]
-                //          |
-                //          v
-                //      ( Data, Vtable )
-                //                |
-                //                v
-                //              /-------\
-                //              | ...   |
-                //              \-------/
-                //
-                //
-                // WE CAN CONVERT THIS INTO THE ABOVE LOGIC BY DOING
-                //
-                // data = &(*args[0]).0    // gives a pointer to Data above (really the same pointer)
-                // vtable = (*args[0]).1   // loads the vtable out
-                // (data, vtable)          // an equivalent Rust `*mut dyn Trait`
-                //
-                // SO THEN WE CAN USE THE ABOVE CODE.
-                let virtual_drop = Instance {
-                    def: ty::InstanceKind::Virtual(drop_fn.def_id(), 0), // idx 0: the drop function
-                    args: drop_fn.args,
-                };
-                debug!("ty = {:?}", ty);
-                debug!("drop_fn = {:?}", drop_fn);
-                debug!("args = {:?}", args);
-                let fn_abi = bx.fn_abi_of_instance(virtual_drop, ty::List::empty());
-                let meta_ptr = place.project_field(bx, 1);
-                let meta = bx.load_operand(meta_ptr);
-                // Truncate vtable off of args list
-                args = &args[..1];
-                debug!("args' = {:?}", args);
-                (
-                    true,
-                    meth::VirtualIndex::from_index(ty::COMMON_VTABLE_ENTRIES_DROPINPLACE)
-                        .get_optional_fn(bx, meta.immediate(), ty, fn_abi),
-                    fn_abi,
-                    virtual_drop,
-                )
-            }
             _ => (
                 false,
                 bx.get_fn_addr(drop_fn),
@@ -703,6 +677,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             unwind,
             &[],
             Some(drop_instance),
+            CallKind::Normal,
             !maybe_null && mergeable_succ,
         )
     }
@@ -776,6 +751,12 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 // `#[track_caller]` adds an implicit argument.
                 (LangItem::PanicNullPointerDereference, vec![location])
             }
+            AssertKind::InvalidEnumConstruction(source) => {
+                let source = self.codegen_operand(bx, source).immediate();
+                // It's `fn panic_invalid_enum_construction(source: u128)`,
+                // `#[track_caller]` adds an implicit argument.
+                (LangItem::PanicInvalidEnumConstruction, vec![source, location])
+            }
             _ => {
                 // It's `pub fn panic_...()` and `#[track_caller]` adds an implicit argument.
                 (msg.panic_function(), vec![location])
@@ -785,8 +766,19 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         let (fn_abi, llfn, instance) = common::build_langcall(bx, span, lang_item);
 
         // Codegen the actual panic invoke/call.
-        let merging_succ =
-            helper.do_call(self, bx, fn_abi, llfn, &args, None, unwind, &[], Some(instance), false);
+        let merging_succ = helper.do_call(
+            self,
+            bx,
+            fn_abi,
+            llfn,
+            &args,
+            None,
+            unwind,
+            &[],
+            Some(instance),
+            CallKind::Normal,
+            false,
+        );
         assert_eq!(merging_succ, MergingSucc::False);
         MergingSucc::False
     }
@@ -815,6 +807,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             mir::UnwindAction::Unreachable,
             &[],
             Some(instance),
+            CallKind::Normal,
             false,
         );
         assert_eq!(merging_succ, MergingSucc::False);
@@ -883,6 +876,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             unwind,
             &[],
             Some(instance),
+            CallKind::Normal,
             mergeable_succ,
         ))
     }
@@ -898,6 +892,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         target: Option<mir::BasicBlock>,
         unwind: mir::UnwindAction,
         fn_span: Span,
+        kind: CallKind,
         mergeable_succ: bool,
     ) -> MergingSucc {
         let source_info = mir::SourceInfo { span: fn_span, ..terminator.source_info };
@@ -915,7 +910,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     fn_span,
                 );
 
-                let instance = match instance.def {
+                match instance.def {
                     // We don't need AsyncDropGlueCtorShim here because it is not `noop func`,
                     // it is `func returning noop future`
                     ty::InstanceKind::DropGlue(_, None) => {
@@ -1004,14 +999,35 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                                         intrinsic.name,
                                     );
                                 }
-                                instance
+                                (Some(instance), None)
                             }
                         }
                     }
-                    _ => instance,
-                };
 
-                (Some(instance), None)
+                    _ if kind == CallKind::Tail
+                        && instance.def.requires_caller_location(bx.tcx()) =>
+                    {
+                        if let Some(hir_id) =
+                            terminator.source_info.scope.lint_root(&self.mir.source_scopes)
+                        {
+                            let msg = "tail calling a function marked with `#[track_caller]` has no special effect";
+                            bx.tcx().node_lint(TAIL_CALL_TRACK_CALLER, hir_id, |d| {
+                                _ = d.primary_message(msg).span(fn_span)
+                            });
+                        }
+
+                        let instance = ty::Instance::resolve_for_fn_ptr(
+                            bx.tcx(),
+                            bx.typing_env(),
+                            def_id,
+                            generic_args,
+                        )
+                        .unwrap();
+
+                        (None, Some(bx.get_fn_addr(instance)))
+                    }
+                    _ => (Some(instance), None),
+                }
             }
             ty::FnPtr(..) => (None, Some(callee.immediate())),
             _ => bug!("{} is not callable", callee.layout.ty),
@@ -1041,8 +1057,13 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         // We still need to call `make_return_dest` even if there's no `target`, since
         // `fn_abi.ret` could be `PassMode::Indirect`, even if it is uninhabited,
         // and `make_return_dest` adds the return-place indirect pointer to `llargs`.
-        let return_dest = self.make_return_dest(bx, destination, &fn_abi.ret, &mut llargs);
-        let destination = target.map(|target| (return_dest, target));
+        let destination = match kind {
+            CallKind::Normal => {
+                let return_dest = self.make_return_dest(bx, destination, &fn_abi.ret, &mut llargs);
+                target.map(|target| (return_dest, target))
+            }
+            CallKind::Tail => None,
+        };
 
         // Split the rust-call tupled arguments off.
         let (first_args, untuple) = if sig.abi() == ExternAbi::RustCall
@@ -1058,6 +1079,14 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         // to generate `lifetime_end` when the call returns.
         let mut lifetime_ends_after_call: Vec<(Bx::Value, Size)> = Vec::new();
         'make_args: for (i, arg) in first_args.iter().enumerate() {
+            if kind == CallKind::Tail && matches!(fn_abi.args[i].mode, PassMode::Indirect { .. }) {
+                // FIXME: https://github.com/rust-lang/rust/pull/144232#discussion_r2218543841
+                span_bug!(
+                    fn_span,
+                    "arguments using PassMode::Indirect are currently not supported for tail calls"
+                );
+            }
+
             let mut op = self.codegen_operand(bx, &arg.node);
 
             if let (0, Some(ty::InstanceKind::Virtual(_, idx))) = (i, instance.map(|i| i.def)) {
@@ -1100,33 +1129,6 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                             fn_abi,
                         ));
                         llargs.push(data_ptr);
-                        continue;
-                    }
-                    Immediate(_) => {
-                        // See comment above explaining why we peel these newtypes
-                        while !op.layout.ty.is_raw_ptr() && !op.layout.ty.is_ref() {
-                            let (idx, _) = op.layout.non_1zst_field(bx).expect(
-                                "not exactly one non-1-ZST field in a `DispatchFromDyn` type",
-                            );
-                            op = op.extract_field(self, bx, idx.as_usize());
-                        }
-
-                        // Make sure that we've actually unwrapped the rcvr down
-                        // to a pointer or ref to `dyn* Trait`.
-                        if !op.layout.ty.builtin_deref(true).unwrap().is_dyn_star() {
-                            span_bug!(fn_span, "can't codegen a virtual call on {:#?}", op);
-                        }
-                        let place = op.deref(bx.cx());
-                        let data_place = place.project_field(bx, 0);
-                        let meta_place = place.project_field(bx, 1);
-                        let meta = bx.load_operand(meta_place);
-                        llfn = Some(meth::VirtualIndex::from_index(idx).get_fn(
-                            bx,
-                            meta.immediate(),
-                            op.layout.ty,
-                            fn_abi,
-                        ));
-                        llargs.push(data_place.val.llval);
                         continue;
                     }
                     _ => {
@@ -1212,6 +1214,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             unwind,
             &lifetime_ends_after_call,
             instance,
+            kind,
             mergeable_succ,
         )
     }
@@ -1453,15 +1456,23 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 target,
                 unwind,
                 fn_span,
+                CallKind::Normal,
                 mergeable_succ(),
             ),
-            mir::TerminatorKind::TailCall { .. } => {
-                // FIXME(explicit_tail_calls): implement tail calls in ssa backend
-                span_bug!(
-                    terminator.source_info.span,
-                    "`TailCall` terminator is not yet supported by `rustc_codegen_ssa`"
-                )
-            }
+            mir::TerminatorKind::TailCall { ref func, ref args, fn_span } => self
+                .codegen_call_terminator(
+                    helper,
+                    bx,
+                    terminator,
+                    func,
+                    args,
+                    mir::Place::from(mir::RETURN_PLACE),
+                    None,
+                    mir::UnwindAction::Unreachable,
+                    fn_span,
+                    CallKind::Tail,
+                    mergeable_succ(),
+                ),
             mir::TerminatorKind::CoroutineDrop | mir::TerminatorKind::Yield { .. } => {
                 bug!("coroutine ops in codegen")
             }

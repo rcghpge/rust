@@ -301,7 +301,7 @@ pub(super) fn elf_e_flags(architecture: Architecture, sess: &Session) -> u32 {
                 "n32" if !is_32bit => e_flags |= elf::EF_MIPS_ABI2,
                 "n64" if !is_32bit => {}
                 "" if is_32bit => e_flags |= elf::EF_MIPS_ABI_O32,
-                "" => sess.dcx().fatal("LLVM ABI must be specifed for 64-bit MIPS targets"),
+                "" => sess.dcx().fatal("LLVM ABI must be specified for 64-bit MIPS targets"),
                 s if is_32bit => {
                     sess.dcx().fatal(format!("invalid LLVM ABI `{}` for 32-bit MIPS target", s))
                 }
@@ -329,10 +329,16 @@ pub(super) fn elf_e_flags(architecture: Architecture, sess: &Session) -> u32 {
             // Source: https://github.com/riscv-non-isa/riscv-elf-psabi-doc/blob/079772828bd10933d34121117a222b4cc0ee2200/riscv-elf.adoc
             let mut e_flags: u32 = 0x0;
 
-            // Check if compressed is enabled
-            // `unstable_target_features` is used here because "c" is gated behind riscv_target_feature.
-            if sess.unstable_target_features.contains(&sym::c) {
+            // Check if compression is enabled
+            // `unstable_target_features` is used here because "zca" is gated behind riscv_target_feature.
+            if sess.unstable_target_features.contains(&sym::zca) {
                 e_flags |= elf::EF_RISCV_RVC;
+            }
+
+            // Check if RVTSO is enabled
+            // `unstable_target_features` is used here because "ztso" is gated behind riscv_target_feature.
+            if sess.unstable_target_features.contains(&sym::ztso) {
+                e_flags |= elf::EF_RISCV_TSO;
             }
 
             // Set the appropriate flag based on ABI

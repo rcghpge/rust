@@ -488,6 +488,13 @@ The maximum cognitive complexity a function can have
 ## `disallowed-macros`
 The list of disallowed macros, written as fully qualified paths.
 
+**Fields:**
+- `path` (required): the fully qualified path to the macro that should be disallowed
+- `reason` (optional): explanation why this macro is disallowed
+- `replacement` (optional): suggested alternative macro
+- `allow-invalid` (optional, `false` by default): when set to `true`, it will ignore this entry
+  if the path doesn't exist, instead of emitting an error
+
 **Default Value:** `[]`
 
 ---
@@ -497,6 +504,13 @@ The list of disallowed macros, written as fully qualified paths.
 
 ## `disallowed-methods`
 The list of disallowed methods, written as fully qualified paths.
+
+**Fields:**
+- `path` (required): the fully qualified path to the method that should be disallowed
+- `reason` (optional): explanation why this method is disallowed
+- `replacement` (optional): suggested alternative method
+- `allow-invalid` (optional, `false` by default): when set to `true`, it will ignore this entry
+  if the path doesn't exist, instead of emitting an error
 
 **Default Value:** `[]`
 
@@ -520,6 +534,13 @@ default configuration of Clippy. By default, any configuration will replace the 
 ## `disallowed-types`
 The list of disallowed types, written as fully qualified paths.
 
+**Fields:**
+- `path` (required): the fully qualified path to the type that should be disallowed
+- `reason` (optional): explanation why this type is disallowed
+- `replacement` (optional): suggested alternative type
+- `allow-invalid` (optional, `false` by default): when set to `true`, it will ignore this entry
+  if the path doesn't exist, instead of emitting an error
+
 **Default Value:** `[]`
 
 ---
@@ -534,7 +555,7 @@ default configuration of Clippy. By default, any configuration will replace the 
 * `doc-valid-idents = ["ClipPy"]` would replace the default list with `["ClipPy"]`.
 * `doc-valid-idents = ["ClipPy", ".."]` would append `ClipPy` to the default list.
 
-**Default Value:** `["KiB", "MiB", "GiB", "TiB", "PiB", "EiB", "MHz", "GHz", "THz", "AccessKit", "CoAP", "CoreFoundation", "CoreGraphics", "CoreText", "DevOps", "Direct2D", "Direct3D", "DirectWrite", "DirectX", "ECMAScript", "GPLv2", "GPLv3", "GitHub", "GitLab", "IPv4", "IPv6", "ClojureScript", "CoffeeScript", "JavaScript", "PostScript", "PureScript", "TypeScript", "WebAssembly", "NaN", "NaNs", "OAuth", "GraphQL", "OCaml", "OpenAL", "OpenDNS", "OpenGL", "OpenMP", "OpenSSH", "OpenSSL", "OpenStreetMap", "OpenTelemetry", "OpenType", "WebGL", "WebGL2", "WebGPU", "WebRTC", "WebSocket", "WebTransport", "WebP", "OpenExr", "YCbCr", "sRGB", "TensorFlow", "TrueType", "iOS", "macOS", "FreeBSD", "NetBSD", "OpenBSD", "TeX", "LaTeX", "BibTeX", "BibLaTeX", "MinGW", "CamelCase"]`
+**Default Value:** `["KiB", "MiB", "GiB", "TiB", "PiB", "EiB", "MHz", "GHz", "THz", "AccessKit", "CoAP", "CoreFoundation", "CoreGraphics", "CoreText", "DevOps", "Direct2D", "Direct3D", "DirectWrite", "DirectX", "ECMAScript", "GPLv2", "GPLv3", "GitHub", "GitLab", "IPv4", "IPv6", "ClojureScript", "CoffeeScript", "JavaScript", "PostScript", "PureScript", "TypeScript", "PowerPC", "WebAssembly", "NaN", "NaNs", "OAuth", "GraphQL", "OCaml", "OpenAL", "OpenDNS", "OpenGL", "OpenMP", "OpenSSH", "OpenSSL", "OpenStreetMap", "OpenTelemetry", "OpenType", "WebGL", "WebGL2", "WebGPU", "WebRTC", "WebSocket", "WebTransport", "WebP", "OpenExr", "YCbCr", "sRGB", "TensorFlow", "TrueType", "iOS", "macOS", "FreeBSD", "NetBSD", "OpenBSD", "NixOS", "TeX", "LaTeX", "BibTeX", "BibLaTeX", "MinGW", "CamelCase"]`
 
 ---
 **Affected lints:**
@@ -651,13 +672,14 @@ The maximum size of the `Err`-variant in a `Result` returned from a function
 
 
 ## `lint-commented-code`
-Whether collapsible `if` chains are linted if they contain comments inside the parts
+Whether collapsible `if` and `else if` chains are linted if they contain comments inside the parts
 that would be collapsed.
 
 **Default Value:** `false`
 
 ---
 **Affected lints:**
+* [`collapsible_else_if`](https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_else_if)
 * [`collapsible_if`](https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_if)
 
 
@@ -870,6 +892,7 @@ The minimum rust version that the project supports. Defaults to the `rust-versio
 * [`unnested_or_patterns`](https://rust-lang.github.io/rust-clippy/master/index.html#unnested_or_patterns)
 * [`unused_trait_names`](https://rust-lang.github.io/rust-clippy/master/index.html#unused_trait_names)
 * [`use_self`](https://rust-lang.github.io/rust-clippy/master/index.html#use_self)
+* [`zero_ptr`](https://rust-lang.github.io/rust-clippy/master/index.html#zero_ptr)
 
 
 ## `pass-by-value-size-limit`

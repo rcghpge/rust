@@ -630,6 +630,13 @@ impl f128 {
 
     /// Converts radians to degrees.
     ///
+    /// # Unspecified precision
+    ///
+    /// The precision of this function is non-deterministic. This means it varies by platform,
+    /// Rust version, and can even differ within the same execution from one invocation to the next.
+    ///
+    /// # Examples
+    ///
     /// ```
     /// #![feature(f128)]
     /// # // FIXME(f16_f128): remove when `eqtf2` is available
@@ -645,12 +652,21 @@ impl f128 {
     #[unstable(feature = "f128", issue = "116909")]
     #[must_use = "this returns the result of the operation, without modifying the original"]
     pub const fn to_degrees(self) -> Self {
-        // Use a literal for better precision.
-        const PIS_IN_180: f128 = 57.2957795130823208767981548141051703324054724665643215491602_f128;
+        // The division here is correctly rounded with respect to the true value of 180/π.
+        // Although π is irrational and already rounded, the double rounding happens
+        // to produce correct result for f128.
+        const PIS_IN_180: f128 = 180.0 / consts::PI;
         self * PIS_IN_180
     }
 
     /// Converts degrees to radians.
+    ///
+    /// # Unspecified precision
+    ///
+    /// The precision of this function is non-deterministic. This means it varies by platform,
+    /// Rust version, and can even differ within the same execution from one invocation to the next.
+    ///
+    /// # Examples
     ///
     /// ```
     /// #![feature(f128)]
@@ -668,7 +684,8 @@ impl f128 {
     #[unstable(feature = "f128", issue = "116909")]
     #[must_use = "this returns the result of the operation, without modifying the original"]
     pub const fn to_radians(self) -> f128 {
-        // Use a literal for better precision.
+        // Use a literal to avoid double rounding, consts::PI is already rounded,
+        // and dividing would round again.
         const RADS_PER_DEG: f128 =
             0.0174532925199432957692369076848861271344287188854172545609719_f128;
         self * RADS_PER_DEG
@@ -1448,7 +1465,6 @@ impl f128 {
     #[rustc_allow_incoherent_impl]
     #[unstable(feature = "f128", issue = "116909")]
     #[rustc_const_unstable(feature = "f128", issue = "116909")]
-    // #[rustc_const_unstable(feature = "const_float_round_methods", issue = "141555")]
     #[must_use = "method returns a new number and does not mutate the original value"]
     pub const fn floor(self) -> f128 {
         // SAFETY: intrinsic with no preconditions
@@ -1478,7 +1494,6 @@ impl f128 {
     #[rustc_allow_incoherent_impl]
     #[unstable(feature = "f128", issue = "116909")]
     #[rustc_const_unstable(feature = "f128", issue = "116909")]
-    // #[rustc_const_unstable(feature = "const_float_round_methods", issue = "141555")]
     #[must_use = "method returns a new number and does not mutate the original value"]
     pub const fn ceil(self) -> f128 {
         // SAFETY: intrinsic with no preconditions
@@ -1514,7 +1529,6 @@ impl f128 {
     #[rustc_allow_incoherent_impl]
     #[unstable(feature = "f128", issue = "116909")]
     #[rustc_const_unstable(feature = "f128", issue = "116909")]
-    // #[rustc_const_unstable(feature = "const_float_round_methods", issue = "141555")]
     #[must_use = "method returns a new number and does not mutate the original value"]
     pub const fn round(self) -> f128 {
         // SAFETY: intrinsic with no preconditions
@@ -1548,7 +1562,6 @@ impl f128 {
     #[rustc_allow_incoherent_impl]
     #[unstable(feature = "f128", issue = "116909")]
     #[rustc_const_unstable(feature = "f128", issue = "116909")]
-    // #[rustc_const_unstable(feature = "const_float_round_methods", issue = "141555")]
     #[must_use = "method returns a new number and does not mutate the original value"]
     pub const fn round_ties_even(self) -> f128 {
         intrinsics::round_ties_even_f128(self)
@@ -1580,7 +1593,6 @@ impl f128 {
     #[rustc_allow_incoherent_impl]
     #[unstable(feature = "f128", issue = "116909")]
     #[rustc_const_unstable(feature = "f128", issue = "116909")]
-    // #[rustc_const_unstable(feature = "const_float_round_methods", issue = "141555")]
     #[must_use = "method returns a new number and does not mutate the original value"]
     pub const fn trunc(self) -> f128 {
         // SAFETY: intrinsic with no preconditions
@@ -1611,7 +1623,6 @@ impl f128 {
     #[rustc_allow_incoherent_impl]
     #[unstable(feature = "f128", issue = "116909")]
     #[rustc_const_unstable(feature = "f128", issue = "116909")]
-    // #[rustc_const_unstable(feature = "const_float_round_methods", issue = "141555")]
     #[must_use = "method returns a new number and does not mutate the original value"]
     pub const fn fract(self) -> f128 {
         self - self.trunc()

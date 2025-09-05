@@ -12,7 +12,7 @@ use std::ops::Range;
 
 use rustc_abi::{self as abi, FieldIdx, Size, VariantIdx};
 use rustc_middle::ty::Ty;
-use rustc_middle::ty::layout::{LayoutOf, TyAndLayout};
+use rustc_middle::ty::layout::TyAndLayout;
 use rustc_middle::{bug, mir, span_bug, ty};
 use tracing::{debug, instrument};
 
@@ -168,7 +168,7 @@ where
             // Re-use parent metadata to determine dynamic field layout.
             // With custom DSTS, this *will* execute user-defined code, but the same
             // happens at run-time so that's okay.
-            match self.size_and_align_of(&base_meta, &field_layout)? {
+            match self.size_and_align_from_meta(&base_meta, &field_layout)? {
                 Some((_, align)) => {
                     // For packed types, we need to cap alignment.
                     let align = if let ty::Adt(def, _) = base.layout().ty.kind()
@@ -197,6 +197,15 @@ where
         };
 
         base.offset_with_meta(offset, OffsetMode::Inbounds, meta, field_layout, self)
+    }
+
+    /// Projects multiple fields at once. See [`Self::project_field`] for details.
+    pub fn project_fields<P: Projectable<'tcx, M::Provenance>, const N: usize>(
+        &self,
+        base: &P,
+        fields: [FieldIdx; N],
+    ) -> InterpResult<'tcx, [P; N]> {
+        fields.try_map(|field| self.project_field(base, field))
     }
 
     /// Downcasting to an enum variant.
@@ -296,7 +305,11 @@ where
         base: &'a P,
     ) -> InterpResult<'tcx, ArrayIterator<'a, 'tcx, M::Provenance, P>> {
         let abi::FieldsShape::Array { stride, .. } = base.layout().fields else {
-            span_bug!(self.cur_span(), "project_array_fields: expected an array layout");
+            span_bug!(
+                self.cur_span(),
+                "project_array_fields: expected an array layout, got {:#?}",
+                base.layout()
+            );
         };
         let len = base.len(self)?;
         let field_layout = base.layout().field(self, 0);

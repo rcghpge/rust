@@ -196,7 +196,7 @@ to enable.
 
 ### Document keywords
 
-This is for Rust compiler internal use only.
+This is for internal use in the std library.
 
 Rust keywords are documented in the standard library (look for `match` for example).
 
@@ -208,6 +208,23 @@ To do so, the `#[doc(keyword = "...")]` attribute is used. Example:
 
 /// Some documentation about the keyword.
 #[doc(keyword = "break")]
+mod empty_mod {}
+```
+
+### Document builtin attributes
+
+This is for internal use in the std library.
+
+Rust builtin attributes are documented in the standard library (look for `repr` for example).
+
+To do so, the `#[doc(attribute = "...")]` attribute is used. Example:
+
+```rust
+#![feature(rustdoc_internals)]
+#![allow(internal_features)]
+
+/// Some documentation about the attribute.
+#[doc(attribute = "repr")]
 mod empty_mod {}
 ```
 
@@ -394,6 +411,12 @@ crate. However, if you want to link to docs that exist in neither of those place
 flags to control that behavior. When the `--extern-html-root-url` flag is given with a name matching
 one of your dependencies, rustdoc use that URL for those docs. Keep in mind that if those docs exist
 in the output directory, those local docs will still override this flag.
+
+The names in this flag are first matched against the names given in the `--extern name=` flags,
+which allows selecting between multiple crates with the same name (e.g. multiple versions of
+the same crate). For transitive dependencies that haven't been loaded via an `--extern` flag, matching
+falls backs to using crate names only, without ability to distinguish between multiple crates with
+the same name.
 
 ## `-Z force-unstable-if-unmarked`
 
@@ -790,3 +813,7 @@ will be split as follows:
     "you today?",
 ]
 ```
+
+## `--generate-macro-expansion`: Generate macros expansion toggles in source code
+
+This flag enables the generation of toggles to expand macros in the HTML source code pages.

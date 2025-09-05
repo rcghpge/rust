@@ -32,7 +32,7 @@ impl<T: PointeeSized> *mut T {
         self as _
     }
 
-    /// Try to cast to a pointer of another type by checking aligment.
+    /// Try to cast to a pointer of another type by checking alignment.
     ///
     /// If the pointer is properly aligned to the target type, it will be
     /// cast to the target type. Otherwise, `None` is returned.
@@ -106,6 +106,7 @@ impl<T: PointeeSized> *mut T {
     ///
     /// // This dereference is UB. The pointer only has provenance for `x` but points to `y`.
     /// println!("{:?}", unsafe { &*bad });
+    /// ```
     #[unstable(feature = "set_ptr_value", issue = "75091")]
     #[must_use = "returns a new pointer rather than modifying its argument"]
     #[inline]
@@ -1687,6 +1688,31 @@ impl<T: PointeeSized> *mut T {
     }
 }
 
+impl<T> *mut T {
+    /// Casts from a type to its maybe-uninitialized version.
+    ///
+    /// This is always safe, since UB can only occur if the pointer is read
+    /// before being initialized.
+    #[must_use]
+    #[inline(always)]
+    #[unstable(feature = "cast_maybe_uninit", issue = "145036")]
+    pub const fn cast_uninit(self) -> *mut MaybeUninit<T> {
+        self as _
+    }
+}
+impl<T> *mut MaybeUninit<T> {
+    /// Casts from a maybe-uninitialized type to its initialized version.
+    ///
+    /// This is always safe, since UB can only occur if the pointer is read
+    /// before being initialized.
+    #[must_use]
+    #[inline(always)]
+    #[unstable(feature = "cast_maybe_uninit", issue = "145036")]
+    pub const fn cast_init(self) -> *mut T {
+        self as _
+    }
+}
+
 impl<T> *mut [T] {
     /// Returns the length of a raw slice.
     ///
@@ -1881,10 +1907,11 @@ impl<T> *mut [T] {
     /// }
     /// ```
     #[unstable(feature = "slice_ptr_get", issue = "74265")]
+    #[rustc_const_unstable(feature = "const_index", issue = "143775")]
     #[inline(always)]
-    pub unsafe fn get_unchecked_mut<I>(self, index: I) -> *mut I::Output
+    pub const unsafe fn get_unchecked_mut<I>(self, index: I) -> *mut I::Output
     where
-        I: SliceIndex<[T]>,
+        I: [const] SliceIndex<[T]>,
     {
         // SAFETY: the caller ensures that `self` is dereferenceable and `index` in-bounds.
         unsafe { index.get_unchecked_mut(self) }
@@ -1961,6 +1988,15 @@ impl<T> *mut [T] {
             // SAFETY: the caller must uphold the safety contract for `as_uninit_slice_mut`.
             Some(unsafe { slice::from_raw_parts_mut(self as *mut MaybeUninit<T>, self.len()) })
         }
+    }
+}
+
+impl<T> *mut T {
+    /// Casts from a pointer-to-`T` to a pointer-to-`[T; N]`.
+    #[inline]
+    #[unstable(feature = "ptr_cast_array", issue = "144514")]
+    pub const fn cast_array<const N: usize>(self) -> *mut [T; N] {
+        self.cast()
     }
 }
 

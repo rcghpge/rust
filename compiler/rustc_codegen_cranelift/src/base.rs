@@ -44,9 +44,8 @@ pub(crate) fn codegen_fn<'tcx>(
     let _mir_guard = crate::PrintOnPanic(|| {
         let mut buf = Vec::new();
         with_no_trimmed_paths!({
-            use rustc_middle::mir::pretty;
-            let options = pretty::PrettyPrintMirOptions::from_cli(tcx);
-            pretty::write_mir_fn(tcx, mir, &mut |_, _| Ok(()), &mut buf, options).unwrap();
+            let writer = pretty::MirWriter::new(tcx);
+            writer.write_mir_fn(mir, &mut buf).unwrap();
         });
         String::from_utf8_lossy(&buf).into_owned()
     });
@@ -403,6 +402,18 @@ fn codegen_fn_body(fx: &mut FunctionCx<'_, '_, '_>, start_block: Block) {
                             fx,
                             rustc_hir::LangItem::PanicNullPointerDereference,
                             &[location],
+                            *unwind,
+                            source_info.span,
+                        )
+                    }
+                    AssertKind::InvalidEnumConstruction(source) => {
+                        let source = codegen_operand(fx, source).load_scalar(fx);
+                        let location = fx.get_caller_location(source_info).load_scalar(fx);
+
+                        codegen_panic_inner(
+                            fx,
+                            rustc_hir::LangItem::PanicInvalidEnumConstruction,
+                            &[source, location],
                             *unwind,
                             source_info.span,
                         )
@@ -777,14 +788,6 @@ fn codegen_stmt<'tcx>(fx: &mut FunctionCx<'_, '_, 'tcx>, cur_block: Block, stmt:
                 ) => {
                     let operand = codegen_operand(fx, operand);
                     crate::unsize::coerce_unsized_into(fx, operand, lval);
-                }
-                Rvalue::Cast(
-                    CastKind::PointerCoercion(PointerCoercion::DynStar, _),
-                    ref operand,
-                    _,
-                ) => {
-                    let operand = codegen_operand(fx, operand);
-                    crate::unsize::coerce_dyn_star(fx, operand, lval);
                 }
                 Rvalue::Cast(CastKind::Transmute, ref operand, _to_ty) => {
                     let operand = codegen_operand(fx, operand);

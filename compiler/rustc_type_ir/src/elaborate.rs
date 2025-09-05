@@ -4,7 +4,7 @@ use smallvec::smallvec;
 
 use crate::data_structures::HashSet;
 use crate::inherent::*;
-use crate::lang_items::TraitSolverLangItem;
+use crate::lang_items::SolverTraitLangItem;
 use crate::outlives::{Component, push_outlives_components};
 use crate::{self as ty, Interner, Upcast as _};
 
@@ -140,7 +140,7 @@ impl<I: Interner, O: Elaboratable<I>> Elaborator<I, O> {
         // is present.
         if self.elaborate_sized == ElaborateSized::No
             && let Some(did) = clause.as_trait_clause().map(|c| c.def_id())
-            && self.cx.is_lang_item(did, TraitSolverLangItem::Sized)
+            && self.cx.is_trait_lang_item(did, SolverTraitLangItem::Sized)
         {
             return;
         }
@@ -166,7 +166,7 @@ impl<I: Interner, O: Elaboratable<I>> Elaborator<I, O> {
                 // Get predicates implied by the trait, or only super predicates if we only care about self predicates.
                 match self.mode {
                     Filter::All => self.extend_deduped(
-                        cx.explicit_implied_predicates_of(data.def_id())
+                        cx.explicit_implied_predicates_of(data.def_id().into())
                             .iter_identity()
                             .enumerate()
                             .map(map_to_child_clause),
@@ -179,15 +179,17 @@ impl<I: Interner, O: Elaboratable<I>> Elaborator<I, O> {
                     ),
                 };
             }
-            // `T: ~const Trait` implies `T: ~const Supertrait`.
+            // `T: [const] Trait` implies `T: [const] Supertrait`.
             ty::ClauseKind::HostEffect(data) => self.extend_deduped(
-                cx.explicit_implied_const_bounds(data.def_id()).iter_identity().map(|trait_ref| {
-                    elaboratable.child(
-                        trait_ref
-                            .to_host_effect_clause(cx, data.constness)
-                            .instantiate_supertrait(cx, bound_clause.rebind(data.trait_ref)),
-                    )
-                }),
+                cx.explicit_implied_const_bounds(data.def_id().into()).iter_identity().map(
+                    |trait_ref| {
+                        elaboratable.child(
+                            trait_ref
+                                .to_host_effect_clause(cx, data.constness)
+                                .instantiate_supertrait(cx, bound_clause.rebind(data.trait_ref)),
+                        )
+                    },
+                ),
             ),
             ty::ClauseKind::TypeOutlives(ty::OutlivesPredicate(ty_max, r_min)) => {
                 // We know that `T: 'a` for some type `T`. We can
@@ -232,6 +234,9 @@ impl<I: Interner, O: Elaboratable<I>> Elaborator<I, O> {
                 // predicates.
             }
             ty::ClauseKind::ConstArgHasType(..) => {
+                // Nothing to elaborate
+            }
+            ty::ClauseKind::UnstableFeature(_) => {
                 // Nothing to elaborate
             }
         }
@@ -309,8 +314,8 @@ impl<I: Interner, O: Elaboratable<I>> Iterator for Elaborator<I, O> {
 /// and to make size estimates for vtable layout computation.
 pub fn supertrait_def_ids<I: Interner>(
     cx: I,
-    trait_def_id: I::DefId,
-) -> impl Iterator<Item = I::DefId> {
+    trait_def_id: I::TraitId,
+) -> impl Iterator<Item = I::TraitId> {
     let mut set = HashSet::default();
     let mut stack = vec![trait_def_id];
 
@@ -320,10 +325,10 @@ pub fn supertrait_def_ids<I: Interner>(
         let trait_def_id = stack.pop()?;
 
         for (predicate, _) in cx.explicit_super_predicates_of(trait_def_id).iter_identity() {
-            if let ty::ClauseKind::Trait(data) = predicate.kind().skip_binder() {
-                if set.insert(data.def_id()) {
-                    stack.push(data.def_id());
-                }
+            if let ty::ClauseKind::Trait(data) = predicate.kind().skip_binder()
+                && set.insert(data.def_id())
+            {
+                stack.push(data.def_id());
             }
         }
 
@@ -367,4 +372,55 @@ impl<I: Interner, It: Iterator<Item = I::Clause>> Iterator for FilterToTraits<I,
         let (_, upper) = self.base_iterator.size_hint();
         (0, upper)
     }
+}
+
+pub fn elaborate_outlives_assumptions<I: Interner>(
+    cx: I,
+    assumptions: impl IntoIterator<Item = ty::OutlivesPredicate<I, I::GenericArg>>,
+) -> HashSet<ty::OutlivesPredicate<I, I::GenericArg>> {
+    let mut collected = HashSet::default();
+
+    for ty::OutlivesPredicate(arg1, r2) in assumptions {
+        collected.insert(ty::OutlivesPredicate(arg1, r2));
+        match arg1.kind() {
+            // Elaborate the components of an type, since we may have substituted a
+            // generic coroutine with a more specific type.
+            ty::GenericArgKind::Type(ty1) => {
+                let mut components = smallvec![];
+                push_outlives_components(cx, ty1, &mut components);
+                for c in components {
+                    match c {
+                        Component::Region(r1) => {
+                            if !r1.is_bound() {
+                                collected.insert(ty::OutlivesPredicate(r1.into(), r2));
+                            }
+                        }
+
+                        Component::Param(p) => {
+                            let ty = Ty::new_param(cx, p);
+                            collected.insert(ty::OutlivesPredicate(ty.into(), r2));
+                        }
+
+                        Component::Placeholder(p) => {
+                            let ty = Ty::new_placeholder(cx, p);
+                            collected.insert(ty::OutlivesPredicate(ty.into(), r2));
+                        }
+
+                        Component::Alias(alias_ty) => {
+                            collected.insert(ty::OutlivesPredicate(alias_ty.to_ty(cx).into(), r2));
+                        }
+
+                        Component::UnresolvedInferenceVariable(_) | Component::EscapingAlias(_) => {
+                        }
+                    }
+                }
+            }
+            // Nothing to elaborate for a region.
+            ty::GenericArgKind::Lifetime(_) => {}
+            // Consts don't really participate in outlives.
+            ty::GenericArgKind::Const(_) => {}
+        }
+    }
+
+    collected
 }

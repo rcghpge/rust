@@ -82,7 +82,7 @@ pub(super) fn simplify_cfg<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
     remove_dead_blocks(body);
 
     // FIXME: Should probably be moved into some kind of pass manager
-    body.basic_blocks_mut().raw.shrink_to_fit();
+    body.basic_blocks.as_mut_preserves_cfg().shrink_to_fit();
 }
 
 impl<'tcx> crate::MirPass<'tcx> for SimplifyCfg {
@@ -225,6 +225,7 @@ impl<'a, 'tcx> CfgSimplifier<'a, 'tcx> {
             current = target;
         }
         let last = current;
+        *changed |= *start != last;
         *start = last;
         while let Some((current, mut terminator)) = terminators.pop() {
             let Terminator { kind: TerminatorKind::Goto { ref mut target }, .. } = terminator

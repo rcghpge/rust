@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use rustc_ast::Path;
 use rustc_data_structures::fx::{FxHashSet, FxIndexSet};
 use rustc_errors::codes::*;
@@ -224,9 +222,6 @@ pub struct AnnotationRequired<'a> {
     pub infer_subdiags: Vec<SourceKindSubdiag<'a>>,
     #[subdiagnostic]
     pub multi_suggestions: Vec<SourceKindMultiSuggestion<'a>>,
-    #[note(trait_selection_full_type_written)]
-    pub was_written: bool,
-    pub path: PathBuf,
 }
 
 // Copy of `AnnotationRequired` for E0283
@@ -245,9 +240,6 @@ pub struct AmbiguousImpl<'a> {
     pub infer_subdiags: Vec<SourceKindSubdiag<'a>>,
     #[subdiagnostic]
     pub multi_suggestions: Vec<SourceKindMultiSuggestion<'a>>,
-    #[note(trait_selection_full_type_written)]
-    pub was_written: bool,
-    pub path: PathBuf,
 }
 
 // Copy of `AnnotationRequired` for E0284
@@ -266,9 +258,6 @@ pub struct AmbiguousReturn<'a> {
     pub infer_subdiags: Vec<SourceKindSubdiag<'a>>,
     #[subdiagnostic]
     pub multi_suggestions: Vec<SourceKindMultiSuggestion<'a>>,
-    #[note(trait_selection_full_type_written)]
-    pub was_written: bool,
-    pub path: PathBuf,
 }
 
 // Used when a better one isn't available
@@ -534,7 +523,7 @@ impl Subdiagnostic for AddLifetimeParamsSuggestion<'_> {
                     match self.tcx.parent_hir_node(self.tcx.local_def_id_to_hir_id(anon_reg.scope))
                     {
                         hir::Node::Item(hir::Item {
-                            kind: hir::ItemKind::Trait(_, _, _, generics, ..),
+                            kind: hir::ItemKind::Trait(_, _, _, _, generics, ..),
                             ..
                         })
                         | hir::Node::Item(hir::Item {
@@ -643,7 +632,7 @@ impl Subdiagnostic for AddLifetimeParamsSuggestion<'_> {
                 // Do not suggest constraining the `&self` param, but rather the return type.
                 // If that is wrong (because it is not sufficient), a follow up error will tell the
                 // user to fix it. This way we lower the chances of *over* constraining, but still
-                // get the cake of "correctly" contrained in two steps.
+                // get the cake of "correctly" constrained in two steps.
                 visitor.visit_ty_unambig(self.ty_sup);
             }
             visitor.visit_ty_unambig(self.ty_sub);

@@ -59,7 +59,7 @@ fn equate_intrinsic_type<'tcx>(
 
 /// Returns the unsafety of the given intrinsic.
 fn intrinsic_operation_unsafety(tcx: TyCtxt<'_>, intrinsic_id: LocalDefId) -> hir::Safety {
-    let is_in_list = match tcx.item_name(intrinsic_id.into()) {
+    let is_in_list = match tcx.item_name(intrinsic_id) {
         // When adding a new intrinsic to this list,
         // it's usually worth updating that intrinsic's documentation
         // to note that it's safe to call, since
@@ -93,6 +93,7 @@ fn intrinsic_operation_unsafety(tcx: TyCtxt<'_>, intrinsic_id: LocalDefId) -> hi
         | sym::three_way_compare
         | sym::discriminant_value
         | sym::type_id
+        | sym::type_id_eq
         | sym::select_unpredictable
         | sym::cold_path
         | sym::ptr_guaranteed_cmp
@@ -134,6 +135,11 @@ fn intrinsic_operation_unsafety(tcx: TyCtxt<'_>, intrinsic_id: LocalDefId) -> hi
         | sym::round_ties_even_f32
         | sym::round_ties_even_f64
         | sym::round_ties_even_f128
+        | sym::autodiff
+        | sym::prefetch_read_data
+        | sym::prefetch_write_data
+        | sym::prefetch_read_instruction
+        | sym::prefetch_write_instruction
         | sym::const_eval_select => hir::Safety::Safe,
         _ => hir::Safety::Unsafe,
     };
@@ -143,7 +149,7 @@ fn intrinsic_operation_unsafety(tcx: TyCtxt<'_>, intrinsic_id: LocalDefId) -> hi
             tcx.def_span(intrinsic_id),
             DiagMessage::from(format!(
                 "intrinsic safety mismatch between list of intrinsics within the compiler and core library intrinsics for intrinsic `{}`",
-                tcx.item_name(intrinsic_id.into())
+                tcx.item_name(intrinsic_id)
             )
         )).emit();
     }
@@ -197,6 +203,7 @@ pub(crate) fn check_intrinsic_type(
     let safety = intrinsic_operation_unsafety(tcx, intrinsic_id);
     let n_lts = 0;
     let (n_tps, n_cts, inputs, output) = match intrinsic_name {
+        sym::autodiff => (4, 0, vec![param(0), param(1), param(2)], param(3)),
         sym::abort => (0, 0, vec![], tcx.types.never),
         sym::unreachable => (0, 0, vec![], tcx.types.never),
         sym::breakpoint => (0, 0, vec![], tcx.types.unit),
@@ -215,12 +222,18 @@ pub(crate) fn check_intrinsic_type(
         | sym::prefetch_write_data
         | sym::prefetch_read_instruction
         | sym::prefetch_write_instruction => {
-            (1, 0, vec![Ty::new_imm_ptr(tcx, param(0)), tcx.types.i32], tcx.types.unit)
+            (1, 1, vec![Ty::new_imm_ptr(tcx, param(0))], tcx.types.unit)
         }
         sym::needs_drop => (1, 0, vec![], tcx.types.bool),
 
         sym::type_name => (1, 0, vec![], Ty::new_static_str(tcx)),
-        sym::type_id => (1, 0, vec![], tcx.types.u128),
+        sym::type_id => {
+            (1, 0, vec![], tcx.type_of(tcx.lang_items().type_id().unwrap()).instantiate_identity())
+        }
+        sym::type_id_eq => {
+            let type_id = tcx.type_of(tcx.lang_items().type_id().unwrap()).instantiate_identity();
+            (0, 0, vec![type_id, type_id], tcx.types.bool)
+        }
         sym::offset => (2, 0, vec![param(0), param(1)], param(0)),
         sym::arith_offset => (
             1,
@@ -415,6 +428,9 @@ pub(crate) fn check_intrinsic_type(
             vec![Ty::new_mut_ptr(tcx, tcx.types.u8), tcx.types.usize, tcx.types.usize],
             tcx.types.unit,
         ),
+        sym::const_make_global => {
+            (0, 0, vec![Ty::new_mut_ptr(tcx, tcx.types.u8)], Ty::new_imm_ptr(tcx, tcx.types.u8))
+        }
 
         sym::ptr_offset_from => (
             1,
@@ -433,6 +449,9 @@ pub(crate) fn check_intrinsic_type(
         }
         sym::unchecked_shl | sym::unchecked_shr => (2, 0, vec![param(0), param(1)], param(0)),
         sym::rotate_left | sym::rotate_right => (1, 0, vec![param(0), tcx.types.u32], param(0)),
+        sym::unchecked_funnel_shl | sym::unchecked_funnel_shr => {
+            (1, 0, vec![param(0), param(0), tcx.types.u32], param(0))
+        }
         sym::unchecked_add | sym::unchecked_sub | sym::unchecked_mul => {
             (1, 0, vec![param(0), param(0)], param(0))
         }
@@ -594,8 +613,9 @@ pub(crate) fn check_intrinsic_type(
         | sym::simd_ceil
         | sym::simd_floor
         | sym::simd_round
+        | sym::simd_round_ties_even
         | sym::simd_trunc => (1, 0, vec![param(0)], param(0)),
-        sym::simd_fma | sym::simd_relaxed_fma => {
+        sym::simd_fma | sym::simd_relaxed_fma | sym::simd_funnel_shl | sym::simd_funnel_shr => {
             (1, 0, vec![param(0), param(0), param(0)], param(0))
         }
         sym::simd_gather => (3, 0, vec![param(0), param(1), param(2)], param(0)),
@@ -641,16 +661,16 @@ pub(crate) fn check_intrinsic_type(
         sym::atomic_store => (1, 1, vec![Ty::new_mut_ptr(tcx, param(0)), param(0)], tcx.types.unit),
 
         sym::atomic_xchg
-        | sym::atomic_xadd
-        | sym::atomic_xsub
-        | sym::atomic_and
-        | sym::atomic_nand
-        | sym::atomic_or
-        | sym::atomic_xor
         | sym::atomic_max
         | sym::atomic_min
         | sym::atomic_umax
         | sym::atomic_umin => (1, 1, vec![Ty::new_mut_ptr(tcx, param(0)), param(0)], param(0)),
+        sym::atomic_xadd
+        | sym::atomic_xsub
+        | sym::atomic_and
+        | sym::atomic_nand
+        | sym::atomic_or
+        | sym::atomic_xor => (2, 1, vec![Ty::new_mut_ptr(tcx, param(0)), param(1)], param(0)),
         sym::atomic_fence | sym::atomic_singlethreadfence => (0, 1, Vec::new(), tcx.types.unit),
 
         other => {

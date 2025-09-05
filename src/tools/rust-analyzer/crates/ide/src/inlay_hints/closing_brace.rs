@@ -91,8 +91,6 @@ pub(super) fn hints(
         match_ast! {
             match parent {
                 ast::Fn(it) => {
-                    // FIXME: this could include parameters, but `HirDisplay` prints too much info
-                    // and doesn't respect the max length either, so the hints end up way too long
                     (format!("fn {}", it.name()?), it.name().map(name))
                 },
                 ast::Static(it) => (format!("static {}", it.name()?), it.name().map(name)),
@@ -122,11 +120,11 @@ pub(super) fn hints(
     };
 
     if let Some(mut next) = closing_token.next_token() {
-        if next.kind() == T![;] {
-            if let Some(tok) = next.next_token() {
-                closing_token = next;
-                next = tok;
-            }
+        if next.kind() == T![;]
+            && let Some(tok) = next.next_token()
+        {
+            closing_token = next;
+            next = tok;
         }
         if !(next.kind() == SyntaxKind::WHITESPACE && next.text().contains('\n')) {
             // Only display the hint if the `}` is the last token on the line
@@ -193,7 +191,7 @@ impl Tr for () {
 //^ impl Tr for ()
 impl dyn Tr {
   }
-//^ impl dyn Tr + 'static
+//^ impl dyn Tr
 
 static S0: () = 0;
 static S1: () = {};

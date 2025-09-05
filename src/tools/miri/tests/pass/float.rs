@@ -39,9 +39,8 @@ macro_rules! assert_approx_eq {
     }};
 
     ($a:expr, $b: expr) => {
-        // accept up to 12ULP (4ULP for host floats and 4ULP for miri artificial error and 4 for any additional effects
-        // due to having multiple error sources.
-        assert_approx_eq!($a, $b, 12);
+        // accept up to 8ULP (4ULP for host floats and 4ULP for miri artificial error).
+        assert_approx_eq!($a, $b, 8);
     };
 }
 
@@ -176,6 +175,7 @@ fn assert_eq_msg<T: PartialEq + Debug>(x: T, y: T, msg: impl Display) {
 }
 
 /// Check that floats have bitwise equality
+#[track_caller]
 fn assert_biteq<F: Float>(a: F, b: F, msg: impl Display) {
     let ab = a.to_bits();
     let bb = b.to_bits();
@@ -189,6 +189,7 @@ fn assert_biteq<F: Float>(a: F, b: F, msg: impl Display) {
 }
 
 /// Check that two floats have equality
+#[track_caller]
 fn assert_feq<F: Float>(a: F, b: F, msg: impl Display) {
     let ab = a.to_bits();
     let bb = b.to_bits();
@@ -1051,6 +1052,10 @@ pub fn libm() {
     assert_eq!(42f64.powf(0.0), 1.0);
     assert_eq!(f32::INFINITY.powf(0.0), 1.0);
     assert_eq!(f64::INFINITY.powf(0.0), 1.0);
+    assert_eq!(f32::NEG_INFINITY.powi(3), f32::NEG_INFINITY);
+    assert_eq!(f32::NEG_INFINITY.powi(2), f32::INFINITY);
+    assert_eq!(f64::INFINITY.powi(3), f64::INFINITY);
+    assert_eq!(f64::INFINITY.powi(2), f64::INFINITY);
 
     // f*::NAN is a quiet NAN and should return 1 as well.
     assert_eq!(f32::NAN.powi(0), 1.0);
@@ -1065,18 +1070,6 @@ pub fn libm() {
     assert_eq!((-1f64).powf(f64::INFINITY), 1.0);
     assert_eq!((-1f32).powf(f32::NEG_INFINITY), 1.0);
     assert_eq!((-1f64).powf(f64::NEG_INFINITY), 1.0);
-
-    // For pow (powf in rust) the C standard says:
-    // x^0 = 1 for all x even a sNaN
-    // FIXME(#4286): this does not match the behavior of all implementations.
-    assert_eq!(SNAN_F32.powf(0.0), 1.0);
-    assert_eq!(SNAN_F64.powf(0.0), 1.0);
-
-    // For pown (powi in rust) the C standard says:
-    // x^0 = 1 for all x even a sNaN
-    // FIXME(#4286): this does not match the behavior of all implementations.
-    assert_eq!(SNAN_F32.powi(0), 1.0);
-    assert_eq!(SNAN_F64.powi(0), 1.0);
 
     assert_eq!(0f32.powi(10), 0.0);
     assert_eq!(0f64.powi(100), 0.0);
@@ -1358,7 +1351,7 @@ fn test_min_max_nondet() {
     /// Ensure that if we call the closure often enough, we see both `true` and `false.`
     #[track_caller]
     fn ensure_both(f: impl Fn() -> bool) {
-        let rounds = 16;
+        let rounds = 32;
         let first = f();
         for _ in 1..rounds {
             if f() != first {
@@ -1500,4 +1493,17 @@ fn test_non_determinism() {
     test_operations_f32(12., 5.);
     test_operations_f64(19., 11.);
     test_operations_f128(25., 18.);
+
+    // SNaN^0 = (1 | NaN)
+    ensure_nondet(|| f32::powf(SNAN_F32, 0.0).is_nan());
+    ensure_nondet(|| f64::powf(SNAN_F64, 0.0).is_nan());
+
+    // 1^SNaN = (1 | NaN)
+    ensure_nondet(|| f32::powf(1.0, SNAN_F32).is_nan());
+    ensure_nondet(|| f64::powf(1.0, SNAN_F64).is_nan());
+
+    // same as powf (keep it consistent):
+    // x^SNaN = (1 | NaN)
+    ensure_nondet(|| f32::powi(SNAN_F32, 0).is_nan());
+    ensure_nondet(|| f64::powi(SNAN_F64, 0).is_nan());
 }

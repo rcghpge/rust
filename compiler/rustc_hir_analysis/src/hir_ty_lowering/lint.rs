@@ -200,7 +200,7 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
         }) = tcx.hir_node_by_def_id(parent_id)
             && self_ty.hir_id == impl_self_ty.hir_id
         {
-            let Some(of_trait_ref) = of_trait else {
+            let Some(of_trait) = of_trait else {
                 diag.span_suggestion_verbose(
                     impl_self_ty.span.shrink_to_hi(),
                     "you might have intended to implement this trait for a given type",
@@ -209,10 +209,10 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                 );
                 return;
             };
-            if !of_trait_ref.trait_def_id().is_some_and(|def_id| def_id.is_local()) {
+            if !of_trait.trait_ref.trait_def_id().is_some_and(|def_id| def_id.is_local()) {
                 return;
             }
-            let of_trait_span = of_trait_ref.path.span;
+            let of_trait_span = of_trait.trait_ref.path.span;
             // make sure that we are not calling unwrap to abort during the compilation
             let Ok(of_trait_name) = tcx.sess.source_map().span_to_snippet(of_trait_span) else {
                 return;
@@ -447,14 +447,27 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
     fn maybe_suggest_assoc_ty_bound(&self, self_ty: &hir::Ty<'_>, diag: &mut Diag<'_>) {
         let mut parents = self.tcx().hir_parent_iter(self_ty.hir_id);
 
-        if let Some((_, hir::Node::AssocItemConstraint(constraint))) = parents.next()
+        if let Some((c_hir_id, hir::Node::AssocItemConstraint(constraint))) = parents.next()
             && let Some(obj_ty) = constraint.ty()
+            && let Some((_, hir::Node::TraitRef(trait_ref))) = parents.next()
         {
-            if let Some((_, hir::Node::TraitRef(..))) = parents.next()
-                && let Some((_, hir::Node::Ty(ty))) = parents.next()
+            if let Some((_, hir::Node::Ty(ty))) = parents.next()
                 && let hir::TyKind::TraitObject(..) = ty.kind
             {
                 // Assoc ty bounds aren't permitted inside trait object types.
+                return;
+            }
+
+            if trait_ref
+                .path
+                .segments
+                .iter()
+                .find_map(|seg| {
+                    seg.args.filter(|args| args.constraints.iter().any(|c| c.hir_id == c_hir_id))
+                })
+                .is_none_or(|args| args.parenthesized != hir::GenericArgsParentheses::No)
+            {
+                // Only consider angle-bracketed args (where we have a `=` to replace with `:`).
                 return;
             }
 

@@ -12,18 +12,15 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use rustc_codegen_ssa::assert_module_sources::CguReuse;
 use rustc_codegen_ssa::back::link::ensure_removed;
 use rustc_codegen_ssa::base::determine_cgu_reuse;
-use rustc_codegen_ssa::{
-    CodegenResults, CompiledModule, CrateInfo, ModuleKind, errors as ssa_errors,
-};
+use rustc_codegen_ssa::{CodegenResults, CompiledModule, CrateInfo, errors as ssa_errors};
 use rustc_data_structures::profiling::SelfProfilerRef;
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_data_structures::sync::{IntoDynSyncSend, par_map};
+use rustc_hir::attrs::Linkage as RLinkage;
 use rustc_metadata::fs::copy_to_stdout;
 use rustc_middle::dep_graph::{WorkProduct, WorkProductId};
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
-use rustc_middle::mir::mono::{
-    CodegenUnit, Linkage as RLinkage, MonoItem, MonoItemData, Visibility,
-};
+use rustc_middle::mir::mono::{CodegenUnit, MonoItem, MonoItemData, Visibility};
 use rustc_session::Session;
 use rustc_session::config::{DebugInfo, OutFileName, OutputFilenames, OutputType};
 
@@ -364,7 +361,6 @@ fn emit_cgu(
         invocation_temp,
         prof,
         product.object,
-        ModuleKind::Regular,
         name.clone(),
         producer,
     )?;
@@ -373,7 +369,6 @@ fn emit_cgu(
         module_regular,
         module_global_asm: global_asm_object_file.map(|global_asm_object_file| CompiledModule {
             name: format!("{name}.asm"),
-            kind: ModuleKind::Regular,
             object: Some(global_asm_object_file),
             dwarf_object: None,
             bytecode: None,
@@ -390,7 +385,6 @@ fn emit_module(
     invocation_temp: Option<&str>,
     prof: &SelfProfilerRef,
     mut object: cranelift_object::object::write::Object<'_>,
-    kind: ModuleKind,
     name: String,
     producer_str: &str,
 ) -> Result<CompiledModule, String> {
@@ -431,7 +425,6 @@ fn emit_module(
 
     Ok(CompiledModule {
         name,
-        kind,
         object: Some(tmp_file),
         dwarf_object: None,
         bytecode: None,
@@ -486,7 +479,6 @@ fn reuse_workproduct_for_cgu(
     Ok(ModuleCodegenResult {
         module_regular: CompiledModule {
             name: cgu.name().to_string(),
-            kind: ModuleKind::Regular,
             object: Some(obj_out_regular),
             dwarf_object: None,
             bytecode: None,
@@ -496,7 +488,6 @@ fn reuse_workproduct_for_cgu(
         },
         module_global_asm: source_file_global_asm.map(|source_file| CompiledModule {
             name: cgu.name().to_string(),
-            kind: ModuleKind::Regular,
             object: Some(obj_out_global_asm),
             dwarf_object: None,
             bytecode: None,
@@ -530,8 +521,8 @@ fn codegen_cgu_content(
     for (mono_item, item_data) in mono_items {
         match mono_item {
             MonoItem::Fn(instance) => {
-                if tcx.codegen_fn_attrs(instance.def_id()).flags.contains(CodegenFnAttrFlags::NAKED)
-                {
+                let flags = tcx.codegen_instance_attrs(instance.def).flags;
+                if flags.contains(CodegenFnAttrFlags::NAKED) {
                     rustc_codegen_ssa::mir::naked_asm::codegen_naked_asm(
                         &mut GlobalAsmContext { tcx, global_asm: &mut cx.global_asm },
                         instance,
@@ -652,7 +643,6 @@ fn emit_allocator_module(tcx: TyCtxt<'_>) -> Option<CompiledModule> {
             tcx.sess.invocation_temp.as_deref(),
             &tcx.sess.prof,
             product.object,
-            ModuleKind::Allocator,
             "allocator_shim".to_owned(),
             &crate::debuginfo::producer(tcx.sess),
         ) {

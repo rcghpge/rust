@@ -94,7 +94,6 @@
 // tidy-alphabetical-start
 #![feature(alloc_layout_extra)]
 #![feature(allocator_api)]
-#![feature(array_chunks)]
 #![feature(array_into_iter_constructors)]
 #![feature(array_windows)]
 #![feature(ascii_char)]
@@ -103,10 +102,13 @@
 #![feature(async_iterator)]
 #![feature(bstr)]
 #![feature(bstr_internals)]
+#![feature(cast_maybe_uninit)]
 #![feature(char_internals)]
 #![feature(char_max_len)]
 #![feature(clone_to_uninit)]
 #![feature(coerce_unsized)]
+#![feature(const_convert)]
+#![feature(const_default)]
 #![feature(const_eval_select)]
 #![feature(const_heap)]
 #![feature(core_intrinsics)]
@@ -134,7 +136,6 @@
 #![feature(panic_internals)]
 #![feature(pattern)]
 #![feature(pin_coerce_unsized_trait)]
-#![feature(pointer_like_trait)]
 #![feature(ptr_alignment_type)]
 #![feature(ptr_internals)]
 #![feature(ptr_metadata)]
@@ -154,9 +155,11 @@
 #![feature(try_trait_v2)]
 #![feature(try_with_capacity)]
 #![feature(tuple_trait)]
+#![feature(ub_checks)]
 #![feature(unicode_internals)]
 #![feature(unsize)]
 #![feature(unwrap_infallible)]
+#![feature(wtf8_internals)]
 // tidy-alphabetical-end
 //
 // Language features:
@@ -165,6 +168,7 @@
 #![feature(allow_internal_unstable)]
 #![feature(cfg_sanitize)]
 #![feature(const_precise_live_drops)]
+#![feature(const_trait_impl)]
 #![feature(coroutine_trait)]
 #![feature(decl_macro)]
 #![feature(dropck_eyepatch)]
@@ -230,6 +234,8 @@ pub mod sync;
 #[cfg(all(not(no_global_oom_handling), not(no_rc), not(no_sync)))]
 pub mod task;
 pub mod vec;
+#[cfg(all(not(no_rc), not(no_sync), not(no_global_oom_handling)))]
+pub mod wtf8;
 
 #[doc(hidden)]
 #[unstable(feature = "liballoc_internals", issue = "none", reason = "implementation detail")]

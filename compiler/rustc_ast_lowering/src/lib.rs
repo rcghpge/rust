@@ -42,25 +42,25 @@ use std::sync::Arc;
 
 use rustc_ast::node_id::NodeMap;
 use rustc_ast::{self as ast, *};
-use rustc_attr_parsing::{AttributeParser, OmitDoc};
+use rustc_attr_parsing::{AttributeParser, Late, OmitDoc};
 use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::sorted_map::SortedMap;
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_data_structures::sync::spawn;
 use rustc_data_structures::tagged_ptr::TaggedRef;
-use rustc_errors::{DiagArgFromDisplay, DiagCtxtHandle, StashKey};
+use rustc_errors::{DiagArgFromDisplay, DiagCtxtHandle};
 use rustc_hir::def::{DefKind, LifetimeRes, Namespace, PartialRes, PerNS, Res};
 use rustc_hir::def_id::{CRATE_DEF_ID, LOCAL_CRATE, LocalDefId};
 use rustc_hir::lints::DelayedLint;
 use rustc_hir::{
-    self as hir, AngleBrackets, ConstArg, GenericArg, HirId, ItemLocalMap, LangItem,
-    LifetimeSource, LifetimeSyntax, ParamName, TraitCandidate,
+    self as hir, AngleBrackets, ConstArg, GenericArg, HirId, ItemLocalMap, LifetimeSource,
+    LifetimeSyntax, ParamName, Target, TraitCandidate,
 };
 use rustc_index::{Idx, IndexSlice, IndexVec};
 use rustc_macros::extension;
 use rustc_middle::span_bug;
 use rustc_middle::ty::{ResolverAstLowering, TyCtxt};
-use rustc_session::parse::{add_feature_diagnostics, feature_err};
+use rustc_session::parse::add_feature_diagnostics;
 use rustc_span::symbol::{Ident, Symbol, kw, sym};
 use rustc_span::{DUMMY_SP, DesugaringKind, Span};
 use smallvec::SmallVec;
@@ -192,7 +192,12 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
             // interact with `gen`/`async gen` blocks
             allow_async_iterator: [sym::gen_future, sym::async_iterator].into(),
 
-            attribute_parser: AttributeParser::new(tcx.sess, tcx.features(), registered_tools),
+            attribute_parser: AttributeParser::new(
+                tcx.sess,
+                tcx.features(),
+                registered_tools,
+                Late,
+            ),
             delayed_lints: Vec::new(),
         }
     }
@@ -274,6 +279,25 @@ impl ResolverAstLowering {
     fn extra_lifetime_params(&mut self, id: NodeId) -> Vec<(Ident, NodeId, LifetimeRes)> {
         self.extra_lifetime_params_map.get(&id).cloned().unwrap_or_default()
     }
+}
+
+/// How relaxed bounds `?Trait` should be treated.
+///
+/// Relaxed bounds should only be allowed in places where we later
+/// (namely during HIR ty lowering) perform *sized elaboration*.
+#[derive(Clone, Copy, Debug)]
+enum RelaxedBoundPolicy<'a> {
+    Allowed,
+    AllowedIfOnTyParam(NodeId, &'a [ast::GenericParam]),
+    Forbidden(RelaxedBoundForbiddenReason),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RelaxedBoundForbiddenReason {
+    TraitObjectTy,
+    SuperTrait,
+    AssocTyBounds,
+    LateBoundVarsInScope,
 }
 
 /// Context of `impl Trait` in code, which determines whether it is allowed in an HIR subtree,
@@ -652,7 +676,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         let bodies = SortedMap::from_presorted_elements(bodies);
 
         // Don't hash unless necessary, because it's expensive.
-        let (opt_hash_including_bodies, attrs_hash, delayed_lints_hash) =
+        let rustc_middle::hir::Hashes { opt_hash_including_bodies, attrs_hash, delayed_lints_hash } =
             self.tcx.hash_owner_nodes(node, &bodies, &attrs, &delayed_lints, define_opaque);
         let num_nodes = self.item_local_id_counter.as_usize();
         let (nodes, parenting) = index::index_hir(self.tcx, node, &bodies, num_nodes);
@@ -851,25 +875,32 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
     /// name resolver owing to lifetime elision; this also populates the resolver's node-id->def-id
     /// map, so that later calls to `opt_node_id_to_def_id` that refer to these extra lifetime
     /// parameters will be successful.
-    #[instrument(level = "debug", skip(self))]
+    #[instrument(level = "debug", skip(self), ret)]
     #[inline]
     fn lower_lifetime_binder(
         &mut self,
         binder: NodeId,
         generic_params: &[GenericParam],
     ) -> &'hir [hir::GenericParam<'hir>] {
-        let mut generic_params: Vec<_> = self
-            .lower_generic_params_mut(generic_params, hir::GenericParamSource::Binder)
-            .collect();
+        // Start by creating params for extra lifetimes params, as this creates the definitions
+        // that may be referred to by the AST inside `generic_params`.
         let extra_lifetimes = self.resolver.extra_lifetime_params(binder);
         debug!(?extra_lifetimes);
-        generic_params.extend(extra_lifetimes.into_iter().filter_map(|(ident, node_id, res)| {
-            self.lifetime_res_to_generic_param(ident, node_id, res, hir::GenericParamSource::Binder)
-        }));
-        let generic_params = self.arena.alloc_from_iter(generic_params);
-        debug!(?generic_params);
-
-        generic_params
+        let extra_lifetimes: Vec<_> = extra_lifetimes
+            .into_iter()
+            .filter_map(|(ident, node_id, res)| {
+                self.lifetime_res_to_generic_param(
+                    ident,
+                    node_id,
+                    res,
+                    hir::GenericParamSource::Binder,
+                )
+            })
+            .collect();
+        let arena = self.arena;
+        let explicit_generic_params =
+            self.lower_generic_params_mut(generic_params, hir::GenericParamSource::Binder);
+        arena.alloc_from_iter(explicit_generic_params.chain(extra_lifetimes.into_iter()))
     }
 
     fn with_dyn_type_scope<T>(&mut self, in_scope: bool, f: impl FnOnce(&mut Self) -> T) -> T {
@@ -912,11 +943,13 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         id: HirId,
         attrs: &[Attribute],
         target_span: Span,
+        target: Target,
     ) -> &'hir [hir::Attribute] {
         if attrs.is_empty() {
             &[]
         } else {
-            let lowered_attrs = self.lower_attrs_vec(attrs, self.lower_span(target_span), id);
+            let lowered_attrs =
+                self.lower_attrs_vec(attrs, self.lower_span(target_span), id, target);
 
             assert_eq!(id.owner, self.current_hir_id_owner);
             let ret = self.arena.alloc_from_iter(lowered_attrs);
@@ -941,12 +974,14 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         attrs: &[Attribute],
         target_span: Span,
         target_hir_id: HirId,
+        target: Target,
     ) -> Vec<hir::Attribute> {
         let l = self.span_lowerer();
         self.attribute_parser.parse_attribute_list(
             attrs,
             target_span,
             target_hir_id,
+            target,
             OmitDoc::Lower,
             |s| l.lower(s),
             |l| {
@@ -1079,10 +1114,11 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                         &*self.arena.alloc(self.ty(constraint.span, hir::TyKind::Err(guar)));
                     hir::AssocItemConstraintKind::Equality { term: err_ty.into() }
                 } else {
-                    // Desugar `AssocTy: Bounds` into an assoc type binding where the
-                    // later desugars into a trait predicate.
-                    let bounds = self.lower_param_bounds(bounds, itctx);
-
+                    let bounds = self.lower_param_bounds(
+                        bounds,
+                        RelaxedBoundPolicy::Forbidden(RelaxedBoundForbiddenReason::AssocTyBounds),
+                        itctx,
+                    );
                     hir::AssocItemConstraintKind::Bound { bounds }
                 }
             }
@@ -1188,7 +1224,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
     fn lower_path_ty(
         &mut self,
         t: &Ty,
-        qself: &Option<ptr::P<QSelf>>,
+        qself: &Option<Box<QSelf>>,
         path: &Path,
         param_mode: ParamMode,
         itctx: ImplTraitContext,
@@ -1209,7 +1245,9 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                         modifiers: TraitBoundModifiers::NONE,
                         trait_ref: TraitRef { path: path.clone(), ref_id: t.id },
                         span: t.span,
+                        parens: ast::Parens::No,
                     },
+                    RelaxedBoundPolicy::Forbidden(RelaxedBoundForbiddenReason::TraitObjectTy),
                     itctx,
                 );
                 let bounds = this.arena.alloc_from_iter([bound]);
@@ -1265,12 +1303,12 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                     parenthesized: hir::GenericArgsParentheses::No,
                     span_ext: span,
                 });
-                let path = self.make_lang_item_qpath(LangItem::Pin, span, Some(args));
+                let path = self.make_lang_item_qpath(hir::LangItem::Pin, span, Some(args));
                 hir::TyKind::Path(path)
             }
-            TyKind::BareFn(f) => {
+            TyKind::FnPtr(f) => {
                 let generic_params = self.lower_lifetime_binder(t.id, &f.generic_params);
-                hir::TyKind::BareFn(self.arena.alloc(hir::BareFnTy {
+                hir::TyKind::FnPtr(self.arena.alloc(hir::FnPtrTy {
                     generic_params,
                     safety: self.lower_safety(f.safety, hir::Safety::Safe),
                     abi: self.lower_extern(f.ext),
@@ -1326,7 +1364,13 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                             // takes care of rejecting invalid modifier combinations and
                             // const trait bounds in trait object types.
                             GenericBound::Trait(ty) => {
-                                let trait_ref = this.lower_poly_trait_ref(ty, itctx);
+                                let trait_ref = this.lower_poly_trait_ref(
+                                    ty,
+                                    RelaxedBoundPolicy::Forbidden(
+                                        RelaxedBoundForbiddenReason::TraitObjectTy,
+                                    ),
+                                    itctx,
+                                );
                                 Some(trait_ref)
                             }
                             GenericBound::Outlives(lifetime) => {
@@ -1381,9 +1425,9 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                         }
                         path
                     }
-                    ImplTraitContext::InBinding => {
-                        hir::TyKind::TraitAscription(self.lower_param_bounds(bounds, itctx))
-                    }
+                    ImplTraitContext::InBinding => hir::TyKind::TraitAscription(
+                        self.lower_param_bounds(bounds, RelaxedBoundPolicy::Allowed, itctx),
+                    ),
                     ImplTraitContext::FeatureGated(position, feature) => {
                         let guar = self
                             .tcx
@@ -1499,7 +1543,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         let opaque_ty_span = self.mark_span_with_reason(DesugaringKind::OpaqueTy, span, None);
 
         self.lower_opaque_inner(opaque_ty_node_id, origin, opaque_ty_span, |this| {
-            this.lower_param_bounds(bounds, itctx)
+            this.lower_param_bounds(bounds, RelaxedBoundPolicy::Allowed, itctx)
         })
     }
 
@@ -1793,10 +1837,13 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
     fn lower_param_bound(
         &mut self,
         tpb: &GenericBound,
+        rbp: RelaxedBoundPolicy<'_>,
         itctx: ImplTraitContext,
     ) -> hir::GenericBound<'hir> {
         match tpb {
-            GenericBound::Trait(p) => hir::GenericBound::Trait(self.lower_poly_trait_ref(p, itctx)),
+            GenericBound::Trait(p) => {
+                hir::GenericBound::Trait(self.lower_poly_trait_ref(p, rbp, itctx))
+            }
             GenericBound::Outlives(lifetime) => hir::GenericBound::Outlives(self.lower_lifetime(
                 lifetime,
                 LifetimeSource::OutlivesBound,
@@ -1899,7 +1946,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         let (name, kind) = self.lower_generic_param_kind(param, source);
 
         let hir_id = self.lower_node_id(param.id);
-        self.lower_attrs(hir_id, &param.attrs, param.span());
+        self.lower_attrs(hir_id, &param.attrs, param.span(), Target::Param);
         hir::GenericParam {
             hir_id,
             def_id: self.local_def_id(param.id),
@@ -1959,7 +2006,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
 
                 (hir::ParamName::Plain(self.lower_ident(param.ident)), kind)
             }
-            GenericParamKind::Const { ty, kw_span: _, default } => {
+            GenericParamKind::Const { ty, span: _, default } => {
                 let ty = self
                     .lower_ty(ty, ImplTraitContext::Disallowed(ImplTraitPosition::GenericDefault));
 
@@ -1981,7 +2028,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
 
                 (
                     hir::ParamName::Plain(self.lower_ident(param.ident)),
-                    hir::GenericParamKind::Const { ty, default, synthetic: false },
+                    hir::GenericParamKind::Const { ty, default },
                 )
             }
         }
@@ -2011,19 +2058,92 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
     #[instrument(level = "debug", skip(self))]
     fn lower_poly_trait_ref(
         &mut self,
-        p: &PolyTraitRef,
+        PolyTraitRef { bound_generic_params, modifiers, trait_ref, span, parens: _ }: &PolyTraitRef,
+        rbp: RelaxedBoundPolicy<'_>,
         itctx: ImplTraitContext,
     ) -> hir::PolyTraitRef<'hir> {
         let bound_generic_params =
-            self.lower_lifetime_binder(p.trait_ref.ref_id, &p.bound_generic_params);
-        let trait_ref = self.lower_trait_ref(p.modifiers, &p.trait_ref, itctx);
-        let modifiers = self.lower_trait_bound_modifiers(p.modifiers);
+            self.lower_lifetime_binder(trait_ref.ref_id, bound_generic_params);
+        let trait_ref = self.lower_trait_ref(*modifiers, trait_ref, itctx);
+        let modifiers = self.lower_trait_bound_modifiers(*modifiers);
+
+        if let ast::BoundPolarity::Maybe(_) = modifiers.polarity {
+            self.validate_relaxed_bound(trait_ref, *span, rbp);
+        }
+
         hir::PolyTraitRef {
             bound_generic_params,
             modifiers,
             trait_ref,
-            span: self.lower_span(p.span),
+            span: self.lower_span(*span),
         }
+    }
+
+    fn validate_relaxed_bound(
+        &self,
+        trait_ref: hir::TraitRef<'_>,
+        span: Span,
+        rbp: RelaxedBoundPolicy<'_>,
+    ) {
+        // Even though feature `more_maybe_bounds` bypasses the given policy and (currently) enables
+        // relaxed bounds in every conceivable position[^1], we don't want to advertise it to the user
+        // (via a feature gate) since it's super internal. Besides this, it'd be quite distracting.
+        //
+        // [^1]: Strictly speaking, this is incorrect (at the very least for `Sized`) because it's
+        //       no longer fully consistent with default trait elaboration in HIR ty lowering.
+
+        match rbp {
+            RelaxedBoundPolicy::Allowed => return,
+            RelaxedBoundPolicy::AllowedIfOnTyParam(id, params) => {
+                if let Some(res) = self.resolver.get_partial_res(id).and_then(|r| r.full_res())
+                    && let Res::Def(DefKind::TyParam, def_id) = res
+                    && params.iter().any(|p| def_id == self.local_def_id(p.id).to_def_id())
+                {
+                    return;
+                }
+                if self.tcx.features().more_maybe_bounds() {
+                    return;
+                }
+            }
+            RelaxedBoundPolicy::Forbidden(reason) => {
+                if self.tcx.features().more_maybe_bounds() {
+                    return;
+                }
+
+                match reason {
+                    RelaxedBoundForbiddenReason::TraitObjectTy => {
+                        self.dcx().span_err(
+                            span,
+                            "relaxed bounds are not permitted in trait object types",
+                        );
+                        return;
+                    }
+                    RelaxedBoundForbiddenReason::SuperTrait => {
+                        let mut diag = self.dcx().struct_span_err(
+                            span,
+                            "relaxed bounds are not permitted in supertrait bounds",
+                        );
+                        if let Some(def_id) = trait_ref.trait_def_id()
+                            && self.tcx.is_lang_item(def_id, hir::LangItem::Sized)
+                        {
+                            diag.note("traits are `?Sized` by default");
+                        }
+                        diag.emit();
+                        return;
+                    }
+                    RelaxedBoundForbiddenReason::AssocTyBounds
+                    | RelaxedBoundForbiddenReason::LateBoundVarsInScope => {}
+                };
+            }
+        }
+
+        self.dcx()
+            .struct_span_err(span, "this relaxed bound is not permitted here")
+            .with_note(
+                "in this context, relaxed bounds are only allowed on \
+                 type parameters defined by the closest item",
+            )
+            .emit();
     }
 
     fn lower_mt(&mut self, mt: &MutTy, itctx: ImplTraitContext) -> hir::MutTy<'hir> {
@@ -2034,17 +2154,19 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
     fn lower_param_bounds(
         &mut self,
         bounds: &[GenericBound],
+        rbp: RelaxedBoundPolicy<'_>,
         itctx: ImplTraitContext,
     ) -> hir::GenericBounds<'hir> {
-        self.arena.alloc_from_iter(self.lower_param_bounds_mut(bounds, itctx))
+        self.arena.alloc_from_iter(self.lower_param_bounds_mut(bounds, rbp, itctx))
     }
 
     fn lower_param_bounds_mut(
         &mut self,
         bounds: &[GenericBound],
+        rbp: RelaxedBoundPolicy<'_>,
         itctx: ImplTraitContext,
     ) -> impl Iterator<Item = hir::GenericBound<'hir>> {
-        bounds.iter().map(move |bound| self.lower_param_bound(bound, itctx))
+        bounds.iter().map(move |bound| self.lower_param_bound(bound, rbp, itctx))
     }
 
     #[instrument(level = "debug", skip(self), ret)]
@@ -2078,6 +2200,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
             bounds,
             /* colon_span */ None,
             span,
+            RelaxedBoundPolicy::Allowed,
             ImplTraitContext::Universal,
             hir::PredicateOrigin::ImplTrait,
         );
@@ -2109,15 +2232,6 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         // `ExprKind::Paren(ExprKind::Underscore)` and should also be lowered to `GenericArg::Infer`
         match c.value.peel_parens().kind {
             ExprKind::Underscore => {
-                if !self.tcx.features().generic_arg_infer() {
-                    feature_err(
-                        &self.tcx.sess,
-                        sym::generic_arg_infer,
-                        c.value.span,
-                        fluent_generated::ast_lowering_underscore_array_length_unstable,
-                    )
-                    .stash(c.value.span, StashKey::UnderscoreForArrayLengths);
-                }
                 let ct_kind = hir::ConstArgKind::Infer(self.lower_span(c.value.span), ());
                 self.arena.alloc(hir::ConstArg { hir_id: self.lower_node_id(c.id), kind: ct_kind })
             }
@@ -2262,7 +2376,17 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         &mut self,
         modifiers: TraitBoundModifiers,
     ) -> hir::TraitBoundModifiers {
-        hir::TraitBoundModifiers { constness: modifiers.constness, polarity: modifiers.polarity }
+        let constness = match modifiers.constness {
+            BoundConstness::Never => BoundConstness::Never,
+            BoundConstness::Always(span) => BoundConstness::Always(self.lower_span(span)),
+            BoundConstness::Maybe(span) => BoundConstness::Maybe(self.lower_span(span)),
+        };
+        let polarity = match modifiers.polarity {
+            BoundPolarity::Positive => BoundPolarity::Positive,
+            BoundPolarity::Negative(span) => BoundPolarity::Negative(self.lower_span(span)),
+            BoundPolarity::Maybe(span) => BoundPolarity::Maybe(self.lower_span(span)),
+        };
+        hir::TraitBoundModifiers { constness, polarity }
     }
 
     // Helper methods for building HIR.
@@ -2296,6 +2420,27 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
             els: None,
             source,
             span: self.lower_span(span),
+            ty: None,
+        };
+        self.stmt(span, hir::StmtKind::Let(self.arena.alloc(local)))
+    }
+
+    fn stmt_super_let_pat(
+        &mut self,
+        span: Span,
+        pat: &'hir hir::Pat<'hir>,
+        init: Option<&'hir hir::Expr<'hir>>,
+    ) -> hir::Stmt<'hir> {
+        let hir_id = self.next_id();
+        let span = self.lower_span(span);
+        let local = hir::LetStmt {
+            super_: Some(span),
+            hir_id,
+            init,
+            pat,
+            els: None,
+            source: hir::LocalSource::Normal,
+            span,
             ty: None,
         };
         self.stmt(span, hir::StmtKind::Let(self.arena.alloc(local)))
@@ -2363,7 +2508,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         fields: &'hir [hir::PatField<'hir>],
     ) -> &'hir hir::Pat<'hir> {
         let qpath = hir::QPath::LangItem(lang_item, self.lower_span(span));
-        self.pat(span, hir::PatKind::Struct(qpath, fields, false))
+        self.pat(span, hir::PatKind::Struct(qpath, fields, None))
     }
 
     fn pat_ident(&mut self, span: Span, ident: Ident) -> (&'hir hir::Pat<'hir>, HirId) {

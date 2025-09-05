@@ -1061,17 +1061,10 @@ impl IntoStringError {
     }
 }
 
-impl IntoStringError {
-    fn description(&self) -> &str {
-        "C string contained non-utf8 bytes"
-    }
-}
-
 #[stable(feature = "cstring_into", since = "1.7.0")]
 impl fmt::Display for IntoStringError {
-    #[allow(deprecated, deprecated_in_future)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.description().fmt(f)
+        "C string contained non-utf8 bytes".fmt(f)
     }
 }
 
@@ -1096,6 +1089,46 @@ impl From<&CStr> for CString {
     /// by copying the contents into a new allocation.
     fn from(s: &CStr) -> CString {
         s.to_owned()
+    }
+}
+
+#[stable(feature = "c_string_eq_c_str", since = "1.90.0")]
+impl PartialEq<CStr> for CString {
+    #[inline]
+    fn eq(&self, other: &CStr) -> bool {
+        **self == *other
+    }
+
+    #[inline]
+    fn ne(&self, other: &CStr) -> bool {
+        **self != *other
+    }
+}
+
+#[stable(feature = "c_string_eq_c_str", since = "1.90.0")]
+impl PartialEq<&CStr> for CString {
+    #[inline]
+    fn eq(&self, other: &&CStr) -> bool {
+        **self == **other
+    }
+
+    #[inline]
+    fn ne(&self, other: &&CStr) -> bool {
+        **self != **other
+    }
+}
+
+#[cfg(not(no_global_oom_handling))]
+#[stable(feature = "c_string_eq_c_str", since = "1.90.0")]
+impl PartialEq<Cow<'_, CStr>> for CString {
+    #[inline]
+    fn eq(&self, other: &Cow<'_, CStr>) -> bool {
+        **self == **other
+    }
+
+    #[inline]
+    fn ne(&self, other: &Cow<'_, CStr>) -> bool {
+        **self != **other
     }
 }
 
@@ -1181,24 +1214,83 @@ impl CStr {
     }
 }
 
-#[stable(feature = "rust1", since = "1.0.0")]
-impl core::error::Error for NulError {
-    #[allow(deprecated)]
-    fn description(&self) -> &str {
-        "nul byte found in data"
+#[stable(feature = "c_string_eq_c_str", since = "1.90.0")]
+impl PartialEq<CString> for CStr {
+    #[inline]
+    fn eq(&self, other: &CString) -> bool {
+        *self == **other
+    }
+
+    #[inline]
+    fn ne(&self, other: &CString) -> bool {
+        *self != **other
     }
 }
+
+#[cfg(not(no_global_oom_handling))]
+#[stable(feature = "c_string_eq_c_str", since = "1.90.0")]
+impl PartialEq<Cow<'_, Self>> for CStr {
+    #[inline]
+    fn eq(&self, other: &Cow<'_, Self>) -> bool {
+        *self == **other
+    }
+
+    #[inline]
+    fn ne(&self, other: &Cow<'_, Self>) -> bool {
+        *self != **other
+    }
+}
+
+#[cfg(not(no_global_oom_handling))]
+#[stable(feature = "c_string_eq_c_str", since = "1.90.0")]
+impl PartialEq<CStr> for Cow<'_, CStr> {
+    #[inline]
+    fn eq(&self, other: &CStr) -> bool {
+        **self == *other
+    }
+
+    #[inline]
+    fn ne(&self, other: &CStr) -> bool {
+        **self != *other
+    }
+}
+
+#[cfg(not(no_global_oom_handling))]
+#[stable(feature = "c_string_eq_c_str", since = "1.90.0")]
+impl PartialEq<&CStr> for Cow<'_, CStr> {
+    #[inline]
+    fn eq(&self, other: &&CStr) -> bool {
+        **self == **other
+    }
+
+    #[inline]
+    fn ne(&self, other: &&CStr) -> bool {
+        **self != **other
+    }
+}
+
+#[cfg(not(no_global_oom_handling))]
+#[stable(feature = "c_string_eq_c_str", since = "1.90.0")]
+impl PartialEq<CString> for Cow<'_, CStr> {
+    #[inline]
+    fn eq(&self, other: &CString) -> bool {
+        **self == **other
+    }
+
+    #[inline]
+    fn ne(&self, other: &CString) -> bool {
+        **self != **other
+    }
+}
+
+#[stable(feature = "rust1", since = "1.0.0")]
+impl core::error::Error for NulError {}
 
 #[stable(feature = "cstring_from_vec_with_nul", since = "1.58.0")]
 impl core::error::Error for FromVecWithNulError {}
 
 #[stable(feature = "cstring_into", since = "1.7.0")]
 impl core::error::Error for IntoStringError {
-    #[allow(deprecated)]
-    fn description(&self) -> &str {
-        "C string contained non-utf8 bytes"
-    }
-
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         Some(&self.error)
     }

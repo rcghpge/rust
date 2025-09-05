@@ -8,6 +8,7 @@ use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_data_structures::svh::Svh;
 use rustc_data_structures::sync::{DynSend, DynSync, par_for_each_in, try_par_for_each_in};
+use rustc_hir::attrs::AttributeKind;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{DefId, LOCAL_CRATE, LocalDefId, LocalModDefId};
 use rustc_hir::definitions::{DefKey, DefPath, DefPathHash};
@@ -15,7 +16,7 @@ use rustc_hir::intravisit::Visitor;
 use rustc_hir::*;
 use rustc_hir_pretty as pprust_hir;
 use rustc_span::def_id::StableCrateId;
-use rustc_span::{ErrorGuaranteed, Ident, Span, Symbol, kw, sym, with_metavar_spans};
+use rustc_span::{ErrorGuaranteed, Ident, Span, Symbol, kw, with_metavar_spans};
 
 use crate::hir::{ModuleItems, nested_filter};
 use crate::middle::debugger_visualizer::DebuggerVisualizerFile;
@@ -328,8 +329,7 @@ impl<'tcx> TyCtxt<'tcx> {
     }
 
     /// Returns an iterator of the `DefId`s for all body-owners in this
-    /// crate. If you would prefer to iterate over the bodies
-    /// themselves, you can do `self.hir_crate(()).body_ids.iter()`.
+    /// crate.
     #[inline]
     pub fn hir_body_owners(self) -> impl Iterator<Item = LocalDefId> {
         self.hir_crate_items(()).body_owners.iter().copied()
@@ -370,7 +370,7 @@ impl<'tcx> TyCtxt<'tcx> {
     }
 
     pub fn hir_rustc_coherence_is_core(self) -> bool {
-        self.hir_krate_attrs().iter().any(|attr| attr.has_name(sym::rustc_coherence_is_core))
+        find_attr!(self.hir_krate_attrs(), AttributeKind::CoherenceIsCore)
     }
 
     pub fn hir_get_module(self, module: LocalModDefId) -> (&'tcx Mod<'tcx>, Span, HirId) {
@@ -396,12 +396,11 @@ impl<'tcx> TyCtxt<'tcx> {
     where
         V: Visitor<'tcx>,
     {
-        let krate = self.hir_crate(());
-        for info in krate.owners.iter() {
-            if let MaybeOwner::Owner(info) = info {
-                for attrs in info.attrs.map.values() {
-                    walk_list!(visitor, visit_attribute, *attrs);
-                }
+        let krate = self.hir_crate_items(());
+        for owner in krate.owners() {
+            let attrs = self.hir_attr_map(owner);
+            for attrs in attrs.map.values() {
+                walk_list!(visitor, visit_attribute, *attrs);
             }
         }
         V::Result::output()
@@ -534,8 +533,10 @@ impl<'tcx> TyCtxt<'tcx> {
     /// ```
     /// fn foo(x: usize) -> bool {
     ///     if x == 1 {
-    ///         true  // If `get_fn_id_for_return_block` gets passed the `id` corresponding
-    ///     } else {  // to this, it will return `foo`'s `HirId`.
+    ///         // If `get_fn_id_for_return_block` gets passed the `id` corresponding to this, it
+    ///         // will return `foo`'s `HirId`.
+    ///         true
+    ///     } else {
     ///         false
     ///     }
     /// }
@@ -544,8 +545,10 @@ impl<'tcx> TyCtxt<'tcx> {
     /// ```compile_fail,E0308
     /// fn foo(x: usize) -> bool {
     ///     loop {
-    ///         true  // If `get_fn_id_for_return_block` gets passed the `id` corresponding
-    ///     }         // to this, it will return `None`.
+    ///         // If `get_fn_id_for_return_block` gets passed the `id` corresponding to this, it
+    ///         // will return `None`.
+    ///         true
+    ///     }
     ///     false
     /// }
     /// ```
@@ -941,7 +944,7 @@ impl<'tcx> TyCtxt<'tcx> {
             }) => until_within(*outer_span, ty.span),
             // With generics and bounds.
             Node::Item(Item {
-                kind: ItemKind::Trait(_, _, _, generics, bounds, _),
+                kind: ItemKind::Trait(_, _, _, _, generics, bounds, _),
                 span: outer_span,
                 ..
             })
@@ -1225,6 +1228,7 @@ pub(super) fn hir_module_items(tcx: TyCtxt<'_>, module_id: LocalModDefId) -> Mod
         ..
     } = collector;
     ModuleItems {
+        add_root: false,
         submodules: submodules.into_boxed_slice(),
         free_items: items.into_boxed_slice(),
         trait_items: trait_items.into_boxed_slice(),
@@ -1255,11 +1259,20 @@ pub(crate) fn hir_crate_items(tcx: TyCtxt<'_>, _: ()) -> ModuleItems {
         body_owners,
         opaques,
         nested_bodies,
-        delayed_lint_items,
+        mut delayed_lint_items,
         ..
     } = collector;
 
+    // The crate could have delayed lints too, but would not be picked up by the visitor.
+    // The `delayed_lint_items` list is smart - it only contains items which we know from
+    // earlier passes is guaranteed to contain lints. It's a little harder to determine that
+    // for sure here, so we simply always add the crate to the list. If it has no lints,
+    // we'll discover that later. The cost of this should be low, there's only one crate
+    // after all compared to the many items we have we wouldn't want to iterate over later.
+    delayed_lint_items.push(CRATE_OWNER_ID);
+
     ModuleItems {
+        add_root: true,
         submodules: submodules.into_boxed_slice(),
         free_items: items.into_boxed_slice(),
         trait_items: trait_items.into_boxed_slice(),

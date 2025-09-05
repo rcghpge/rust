@@ -41,7 +41,10 @@ else
     "${test_builtins[@]}" --benches
     "${test_builtins[@]}" --benches --release
 
-    if [ "${TEST_VERBATIM:-}" = "1" ]; then
+    # Validate that having a verbatim path for the target directory works
+    # (trivial to regress using `/` in paths to build artifacts rather than
+    # `Path::join`). MinGW does not currently support these paths.
+    if [[ "$target" = *"windows"* ]] && [[ "$target" != *"gnu"* ]]; then
         verb_path=$(cmd.exe //C echo \\\\?\\%cd%\\builtins-test\\target2)
         "${test_builtins[@]}" --target-dir "$verb_path" --features c
     fi
@@ -54,29 +57,26 @@ symcheck=(cargo run -p symbol-check --release)
 [[ "$target" = "wasm"* ]] && symcheck+=(--features wasm)
 symcheck+=(-- build-and-check)
 
-"${symcheck[@]}" -p compiler_builtins --target "$target"
-"${symcheck[@]}" -p compiler_builtins --target "$target" --release
-"${symcheck[@]}" -p compiler_builtins --target "$target" --features c
-"${symcheck[@]}" -p compiler_builtins --target "$target" --features c --release
-"${symcheck[@]}" -p compiler_builtins --target "$target" --features no-asm
-"${symcheck[@]}" -p compiler_builtins --target "$target" --features no-asm --release
-"${symcheck[@]}" -p compiler_builtins --target "$target" --features no-f16-f128
-"${symcheck[@]}" -p compiler_builtins --target "$target" --features no-f16-f128 --release
+"${symcheck[@]}" "$target" -- -p compiler_builtins
+"${symcheck[@]}" "$target" -- -p compiler_builtins --release
+"${symcheck[@]}" "$target" -- -p compiler_builtins --features c
+"${symcheck[@]}" "$target" -- -p compiler_builtins --features c --release
+"${symcheck[@]}" "$target" -- -p compiler_builtins --features no-asm
+"${symcheck[@]}" "$target" -- -p compiler_builtins --features no-asm --release
+"${symcheck[@]}" "$target" -- -p compiler_builtins --features no-f16-f128
+"${symcheck[@]}" "$target" -- -p compiler_builtins --features no-f16-f128 --release
 
 run_intrinsics_test() {
-    args=(
-        --target "$target" --verbose \
-        --manifest-path builtins-test-intrinsics/Cargo.toml
-    )
-    args+=( "$@" )
+    build_args=(--verbose --manifest-path builtins-test-intrinsics/Cargo.toml)
+    build_args+=("$@")
 
     # symcheck also checks the results of builtins-test-intrinsics
-    "${symcheck[@]}" "${args[@]}"
+    "${symcheck[@]}" "$target" -- "${build_args[@]}"
 
     # FIXME: we get access violations on Windows, our entrypoint may need to
     # be tweaked.
     if [ "${BUILD_ONLY:-}" != "1" ] && ! [[ "$target" = *"windows"* ]]; then
-        cargo run "${args[@]}"
+        cargo run --target "$target" "${build_args[@]}"
     fi
 }
 
@@ -164,7 +164,7 @@ else
     mflags+=(--workspace --target "$target")
     cmd=(cargo test "${mflags[@]}")
     profile_flag="--profile"
-    
+
     # If nextest is available, use that
     command -v cargo-nextest && nextest=1 || nextest=0
     if [ "$nextest" = "1" ]; then
@@ -207,7 +207,7 @@ else
     "${cmd[@]}" "$profile_flag" release-checked --features unstable-intrinsics --benches
 
     # Ensure that the routines do not panic.
-    # 
+    #
     # `--tests` must be passed because no-panic is only enabled as a dev
     # dependency. The `release-opt` profile must be used to enable LTO and a
     # single CGU.

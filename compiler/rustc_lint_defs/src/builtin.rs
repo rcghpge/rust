@@ -63,7 +63,10 @@ declare_lint_pass! {
         LOSSY_PROVENANCE_CASTS,
         MACRO_EXPANDED_MACRO_EXPORTS_ACCESSED_BY_ABSOLUTE_PATHS,
         MACRO_USE_EXTERN_CRATE,
+        MALFORMED_DIAGNOSTIC_ATTRIBUTES,
+        MALFORMED_DIAGNOSTIC_FORMAT_LITERALS,
         META_VARIABLE_MISUSE,
+        MISPLACED_DIAGNOSTIC_ATTRIBUTES,
         MISSING_ABI,
         MISSING_UNSAFE_ON_EXTERN,
         MUST_NOT_SUSPEND,
@@ -112,8 +115,8 @@ declare_lint_pass! {
         UNFULFILLED_LINT_EXPECTATIONS,
         UNINHABITED_STATIC,
         UNKNOWN_CRATE_TYPES,
+        UNKNOWN_DIAGNOSTIC_ATTRIBUTES,
         UNKNOWN_LINTS,
-        UNKNOWN_OR_MALFORMED_DIAGNOSTIC_ATTRIBUTES,
         UNNAMEABLE_TEST_ITEMS,
         UNNAMEABLE_TYPES,
         UNREACHABLE_CODE,
@@ -122,7 +125,7 @@ declare_lint_pass! {
         UNSAFE_OP_IN_UNSAFE_FN,
         UNSTABLE_NAME_COLLISIONS,
         UNSTABLE_SYNTAX_PRE_EXPANSION,
-        UNSUPPORTED_FN_PTR_CALLING_CONVENTIONS,
+        UNSUPPORTED_CALLING_CONVENTIONS,
         UNUSED_ASSIGNMENTS,
         UNUSED_ASSOCIATED_TYPE_BOUNDS,
         UNUSED_ATTRIBUTES,
@@ -132,8 +135,8 @@ declare_lint_pass! {
         UNUSED_IMPORTS,
         UNUSED_LABELS,
         UNUSED_LIFETIMES,
-        UNUSED_MACRO_RULES,
         UNUSED_MACROS,
+        UNUSED_MACRO_RULES,
         UNUSED_MUT,
         UNUSED_QUALIFICATIONS,
         UNUSED_UNSAFE,
@@ -214,6 +217,7 @@ declare_lint! {
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::FutureReleaseError,
         reference: "issue #57571 <https://github.com/rust-lang/rust/issues/57571>",
+        report_in_deps: true,
     };
     crate_level_only
 }
@@ -1225,7 +1229,7 @@ declare_lint! {
     ///
     /// ### Explanation
     ///
-    /// A public `use` declaration should not be used to publicly re-export a
+    /// A public `use` declaration should not be used to publically re-export a
     /// private `extern crate`. `pub extern crate` should be used instead.
     ///
     /// This was historically allowed, but is not the intended behavior
@@ -1812,7 +1816,7 @@ declare_lint! {
     "suggest using `dyn Trait` for trait objects",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionError(Edition::Edition2021),
-        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2021/warnings-promoted-to-error.html>",
+        reference: "<https://doc.rust-lang.org/edition-guide/rust-2021/warnings-promoted-to-error.html>",
     };
 }
 
@@ -2153,6 +2157,7 @@ declare_lint! {
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::FutureReleaseError,
         reference: "issue #52234 <https://github.com/rust-lang/rust/issues/52234>",
+        report_in_deps: true,
     };
     crate_level_only
 }
@@ -2296,18 +2301,18 @@ declare_lint! {
 
 declare_lint! {
     /// The `inline_no_sanitize` lint detects incompatible use of
-    /// [`#[inline(always)]`][inline] and [`#[no_sanitize(...)]`][no_sanitize].
+    /// [`#[inline(always)]`][inline] and [`#[sanitize(xyz = "off")]`][sanitize].
     ///
     /// [inline]: https://doc.rust-lang.org/reference/attributes/codegen.html#the-inline-attribute
-    /// [no_sanitize]: https://doc.rust-lang.org/nightly/unstable-book/language-features/no-sanitize.html
+    /// [sanitize]: https://doc.rust-lang.org/nightly/unstable-book/language-features/no-sanitize.html
     ///
     /// ### Example
     ///
     /// ```rust
-    /// #![feature(no_sanitize)]
+    /// #![cfg_attr(not(bootstrap), feature(sanitize))]
     ///
     /// #[inline(always)]
-    /// #[no_sanitize(address)]
+    /// #[cfg_attr(not(bootstrap), sanitize(address = "off"))]
     /// fn x() {}
     ///
     /// fn main() {
@@ -2320,11 +2325,11 @@ declare_lint! {
     /// ### Explanation
     ///
     /// The use of the [`#[inline(always)]`][inline] attribute prevents the
-    /// the [`#[no_sanitize(...)]`][no_sanitize] attribute from working.
+    /// the [`#[sanitize(xyz = "off")]`][sanitize] attribute from working.
     /// Consider temporarily removing `inline` attribute.
     pub INLINE_NO_SANITIZE,
     Warn,
-    "detects incompatible use of `#[inline(always)]` and `#[no_sanitize(...)]`",
+    r#"detects incompatible use of `#[inline(always)]` and `#[sanitize(... = "off")]`"#,
 }
 
 declare_lint! {
@@ -2470,7 +2475,7 @@ declare_lint! {
     "unsafe operations in unsafe functions without an explicit unsafe block are deprecated",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionSemanticsChange(Edition::Edition2024),
-        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>",
+        reference: "<https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>",
         explain_reason: false
     };
     @edition Edition2024 => Warn;
@@ -2836,7 +2841,7 @@ declare_lint! {
     /// [issue #79813]: https://github.com/rust-lang/rust/issues/79813
     /// [future-incompatible]: ../index.md#future-incompatible-lints
     pub SEMICOLON_IN_EXPRESSIONS_FROM_MACROS,
-    Warn,
+    Deny,
     "trailing semicolon in macro body used as expression",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::FutureReleaseError,
@@ -2884,11 +2889,12 @@ declare_lint! {
     /// struct S { /* fields */ }
     /// ```
     pub LEGACY_DERIVE_HELPERS,
-    Warn,
+    Deny,
     "detects derive helper attributes that are used before they are introduced",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::FutureReleaseError,
         reference: "issue #79202 <https://github.com/rust-lang/rust/issues/79202>",
+        report_in_deps: true,
     };
 }
 
@@ -3443,7 +3449,7 @@ declare_lint! {
     "detects usage of old versions of or-patterns",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionError(Edition::Edition2021),
-        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2021/or-patterns-macro-rules.html>",
+        reference: "<https://doc.rust-lang.org/edition-guide/rust-2021/or-patterns-macro-rules.html>",
     };
 }
 
@@ -3492,7 +3498,7 @@ declare_lint! {
         prelude in future editions",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionError(Edition::Edition2021),
-        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2021/prelude.html>",
+        reference: "<https://doc.rust-lang.org/edition-guide/rust-2021/prelude.html>",
     };
 }
 
@@ -3532,7 +3538,7 @@ declare_lint! {
         prelude in future editions",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionError(Edition::Edition2024),
-        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2024/prelude.html>",
+        reference: "<https://doc.rust-lang.org/edition-guide/rust-2024/prelude.html>",
     };
 }
 
@@ -3569,7 +3575,7 @@ declare_lint! {
     "identifiers that will be parsed as a prefix in Rust 2021",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionError(Edition::Edition2021),
-        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2021/reserving-syntax.html>",
+        reference: "<https://doc.rust-lang.org/edition-guide/rust-2021/reserving-syntax.html>",
     };
     crate_level_only
 }
@@ -4098,7 +4104,7 @@ declare_lint! {
     "never type fallback affecting unsafe function calls",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionAndFutureReleaseSemanticsChange(Edition::Edition2024),
-        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2024/never-type-fallback.html>",
+        reference: "<https://doc.rust-lang.org/edition-guide/rust-2024/never-type-fallback.html>",
         report_in_deps: true,
     };
     @edition Edition2024 => Deny;
@@ -4153,7 +4159,7 @@ declare_lint! {
     "never type fallback affecting unsafe function calls",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionAndFutureReleaseError(Edition::Edition2024),
-        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2024/never-type-fallback.html>",
+        reference: "<https://doc.rust-lang.org/edition-guide/rust-2024/never-type-fallback.html>",
         report_in_deps: true,
     };
     report_in_external_macro
@@ -4285,31 +4291,105 @@ declare_lint! {
 }
 
 declare_lint! {
-    /// The `unknown_or_malformed_diagnostic_attributes` lint detects unrecognized or otherwise malformed
-    /// diagnostic attributes.
+    /// The `malformed_diagnostic_attributes` lint detects malformed diagnostic attributes.
     ///
     /// ### Example
     ///
     /// ```rust
-    /// #![feature(diagnostic_namespace)]
-    /// #[diagnostic::does_not_exist]
-    /// struct Foo;
+    /// #[diagnostic::do_not_recommend(message = "message")]
+    /// trait Trait {}
     /// ```
     ///
     /// {{produces}}
     ///
+    /// ### Explanation
+    ///
+    /// It is usually a mistake to use options or syntax that is not supported. Check the spelling,
+    /// and check the diagnostic attribute listing for the correct name and syntax. Also consider if
+    /// you are using an old version of the compiler; perhaps the option or syntax is only available
+    /// in a newer version. See the [reference] for a list of diagnostic attributes and the syntax
+    /// of each.
+    ///
+    /// [reference]: https://doc.rust-lang.org/nightly/reference/attributes/diagnostics.html#the-diagnostic-tool-attribute-namespace
+    pub MALFORMED_DIAGNOSTIC_ATTRIBUTES,
+    Warn,
+    "detects malformed diagnostic attributes",
+}
+
+declare_lint! {
+    /// The `misplaced_diagnostic_attributes` lint detects wrongly placed diagnostic attributes.
+    ///
+    /// ### Example
+    ///
+    /// ```rust
+    /// #[diagnostic::do_not_recommend]
+    /// struct NotUserFacing;
+    /// ```
+    ///
+    /// {{produces}}
     ///
     /// ### Explanation
     ///
-    /// It is usually a mistake to specify a diagnostic attribute that does not exist. Check
-    /// the spelling, and check the diagnostic attribute listing for the correct name. Also
-    /// consider if you are using an old version of the compiler, and the attribute
-    /// is only available in a newer version.
-    pub UNKNOWN_OR_MALFORMED_DIAGNOSTIC_ATTRIBUTES,
+    /// It is usually a mistake to specify a diagnostic attribute on an item it is not meant for.
+    /// For example, `#[diagnostic::do_not_recommend]` can only be placed on trait implementations,
+    /// and does nothing if placed elsewhere. See the [reference] for a list of diagnostic
+    /// attributes and their correct positions.
+    ///
+    /// [reference]: https://doc.rust-lang.org/nightly/reference/attributes/diagnostics.html#the-diagnostic-tool-attribute-namespace
+    pub MISPLACED_DIAGNOSTIC_ATTRIBUTES,
     Warn,
-    "unrecognized or malformed diagnostic attribute",
+    "detects diagnostic attributes that are placed on the wrong item",
 }
 
+declare_lint! {
+    /// The `unknown_diagnostic_attributes` lint detects unknown diagnostic attributes.
+    ///
+    /// ### Example
+    ///
+    /// ```rust
+    /// #[diagnostic::does_not_exist]
+    /// struct Thing;
+    /// ```
+    ///
+    /// {{produces}}
+    ///
+    /// ### Explanation
+    ///
+    /// It is usually a mistake to specify a diagnostic attribute that does not exist. Check the
+    /// spelling, and check the diagnostic attribute listing for the correct name. Also consider if
+    /// you are using an old version of the compiler and the attribute is only available in a newer
+    /// version. See the [reference] for the list of diagnostic attributes.
+    ///
+    /// [reference]: https://doc.rust-lang.org/nightly/reference/attributes/diagnostics.html#the-diagnostic-tool-attribute-namespace
+    pub UNKNOWN_DIAGNOSTIC_ATTRIBUTES,
+    Warn,
+    "detects unknown diagnostic attributes",
+}
+
+declare_lint! {
+    /// The `malformed_diagnostic_format_literals` lint detects malformed diagnostic format
+    /// literals.
+    ///
+    /// ### Example
+    ///
+    /// ```rust
+    /// #[diagnostic::on_unimplemented(message = "{Self}} does not implement `Trait`")]
+    /// trait Trait {}
+    /// ```
+    ///
+    /// {{produces}}
+    ///
+    /// ### Explanation
+    ///
+    /// The `#[diagnostic::on_unimplemented]` attribute accepts string literal values that are
+    /// similar to `format!`'s string literal. See the [reference] for details on what is permitted
+    /// in this string literal.
+    ///
+    /// [reference]: https://doc.rust-lang.org/nightly/reference/attributes/diagnostics.html#the-diagnostic-tool-attribute-namespace
+    pub MALFORMED_DIAGNOSTIC_FORMAT_LITERALS,
+    Warn,
+    "detects diagnostic attribute with malformed diagnostic format literals",
+}
 declare_lint! {
     /// The `ambiguous_glob_imports` lint detects glob imports that should report ambiguity
     /// errors, but previously didn't do that due to rustc bugs.
@@ -4344,11 +4424,12 @@ declare_lint! {
     ///
     /// [future-incompatible]: ../index.md#future-incompatible-lints
     pub AMBIGUOUS_GLOB_IMPORTS,
-    Warn,
+    Deny,
     "detects certain glob imports that require reporting an ambiguity error",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::FutureReleaseError,
         reference: "issue #114095 <https://github.com/rust-lang/rust/issues/114095>",
+        report_in_deps: true,
     };
 }
 
@@ -4546,11 +4627,12 @@ declare_lint! {
     ///
     /// [future-incompatible]: ../index.md#future-incompatible-lints
     pub PRIVATE_MACRO_USE,
-    Warn,
+    Deny,
     "detects certain macro bindings that should not be re-exported",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::FutureReleaseError,
         reference: "issue #120192 <https://github.com/rust-lang/rust/issues/120192>",
+        report_in_deps: true,
     };
 }
 
@@ -4663,7 +4745,7 @@ declare_lint! {
     "detects unsafe functions being used as safe functions",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionError(Edition::Edition2024),
-        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2024/newly-unsafe-functions.html>",
+        reference: "<https://doc.rust-lang.org/edition-guide/rust-2024/newly-unsafe-functions.html>",
     };
 }
 
@@ -4699,7 +4781,7 @@ declare_lint! {
     "detects missing unsafe keyword on extern declarations",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionError(Edition::Edition2024),
-        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2024/unsafe-extern.html>",
+        reference: "<https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-extern.html>",
     };
 }
 
@@ -4740,7 +4822,7 @@ declare_lint! {
     "detects unsafe attributes outside of unsafe",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionError(Edition::Edition2024),
-        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2024/unsafe-attributes.html>",
+        reference: "<https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-attributes.html>",
     };
 }
 
@@ -4750,13 +4832,16 @@ declare_lint! {
     ///
     /// ### Example
     ///
-    /// ```rust
+    #[cfg_attr(not(bootstrap), doc = "```rust,compile_fail")]
+    #[cfg_attr(bootstrap, doc = "```rust")]
     /// #![doc = in_root!()]
     ///
     /// macro_rules! in_root { () => { "" } }
     ///
     /// fn main() {}
-    /// ```
+    #[cfg_attr(not(bootstrap), doc = "```")]
+    #[cfg_attr(bootstrap, doc = "```")]
+    // ^ Needed to avoid tidy warning about odd number of backticks
     ///
     /// {{produces}}
     ///
@@ -4775,11 +4860,12 @@ declare_lint! {
     ///
     /// [future-incompatible]: ../index.md#future-incompatible-lints
     pub OUT_OF_SCOPE_MACRO_CALLS,
-    Warn,
+    Deny,
     "detects out of scope calls to `macro_rules` in key-value attributes",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::FutureReleaseError,
         reference: "issue #124535 <https://github.com/rust-lang/rust/issues/124535>",
+        report_in_deps: true,
     };
 }
 
@@ -4937,7 +5023,7 @@ declare_lint! {
     "Detect and warn on significant change in drop order in tail expression location",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionSemanticsChange(Edition::Edition2024),
-        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2024/temporary-tail-expr-scope.html>",
+        reference: "<https://doc.rust-lang.org/edition-guide/rust-2024/temporary-tail-expr-scope.html>",
     };
 }
 
@@ -4976,7 +5062,7 @@ declare_lint! {
     "will be parsed as a guarded string in Rust 2024",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionError(Edition::Edition2024),
-        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2024/reserved-syntax.html>",
+        reference: "<https://doc.rust-lang.org/edition-guide/rust-2024/reserved-syntax.html>",
     };
     crate_level_only
 }
@@ -5021,4 +5107,91 @@ declare_lint! {
         reference: "issue #134375 <https://github.com/rust-lang/rust/issues/134375>",
         report_in_deps: true,
     };
+}
+
+declare_lint! {
+    /// The `tail_call_track_caller` lint detects usage of `become` attempting to tail call
+    /// a function marked with `#[track_caller]`.
+    ///
+    /// ### Example
+    ///
+    /// ```rust
+    /// #![feature(explicit_tail_calls)]
+    /// #![expect(incomplete_features)]
+    ///
+    /// #[track_caller]
+    /// fn f() {}
+    ///
+    /// fn g() {
+    ///     become f();
+    /// }
+    ///
+    /// g();
+    /// ```
+    ///
+    /// {{produces}}
+    ///
+    /// ### Explanation
+    ///
+    /// Due to implementation details of tail calls and `#[track_caller]` attribute, calls to
+    /// functions marked with `#[track_caller]` cannot become tail calls. As such using `become`
+    /// is no different than a normal call (except for changes in drop order).
+    pub TAIL_CALL_TRACK_CALLER,
+    Warn,
+    "detects tail calls of functions marked with `#[track_caller]`",
+    @feature_gate = explicit_tail_calls;
+}
+declare_lint! {
+    /// The `inline_always_mismatching_target_features` lint will trigger when a
+    /// function with the `#[inline(always)]` and `#[target_feature(enable = "...")]`
+    /// attributes is called and cannot be inlined due to missing target features in the caller.
+    ///
+    /// ### Example
+    ///
+    /// ```rust,ignore (fails on x86_64)
+    /// #[inline(always)]
+    /// #[target_feature(enable = "fp16")]
+    /// unsafe fn callee() {
+    ///     // operations using fp16 types
+    /// }
+    ///
+    /// // Caller does not enable the required target feature
+    /// fn caller() {
+    ///     unsafe { callee(); }
+    /// }
+    ///
+    /// fn main() {
+    ///     caller();
+    /// }
+    /// ```
+    ///
+    /// This will produce:
+    ///
+    /// ```text
+    /// warning: call to `#[inline(always)]`-annotated `callee` requires the same target features. Function will not have `alwaysinline` attribute applied
+    ///   --> $DIR/builtin.rs:5192:14
+    ///    |
+    /// 10 |     unsafe { callee(); }
+    ///    |              ^^^^^^^^
+    ///    |
+    /// note: `fp16` target feature enabled in `callee` here but missing from `caller`
+    ///   --> $DIR/builtin.rs:5185:1
+    ///    |
+    /// 3  | #[target_feature(enable = "fp16")]
+    ///    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    /// 4  | unsafe fn callee() {
+    ///    | ------------------
+    ///    = note: `#[warn(inline_always_mismatching_target_features)]` on by default
+    /// warning: 1 warning emitted
+    /// ```
+    ///
+    /// ### Explanation
+    ///
+    /// Inlining a function with a target feature attribute into a caller that
+    /// lacks the corresponding target feature can lead to unsound behavior.
+    /// LLVM may select the wrong instructions or registers, or reorder
+    /// operations, potentially resulting in runtime errors.
+    pub INLINE_ALWAYS_MISMATCHING_TARGET_FEATURES,
+    Warn,
+    r#"detects when a function annotated with `#[inline(always)]` and `#[target_feature(enable = "..")]` is inlined into a caller without the required target feature"#,
 }

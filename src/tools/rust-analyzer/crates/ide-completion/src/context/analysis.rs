@@ -4,6 +4,7 @@ use std::iter;
 use hir::{ExpandResult, InFile, Semantics, Type, TypeInfo, Variant};
 use ide_db::{RootDatabase, active_parameter::ActiveParameter};
 use itertools::Either;
+use stdx::always;
 use syntax::{
     AstNode, AstToken, Direction, NodeOrToken, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken,
     T, TextRange, TextSize,
@@ -38,9 +39,9 @@ struct ExpansionResult {
     derive_ctx: Option<(SyntaxNode, SyntaxNode, TextSize, ast::Attr)>,
 }
 
-pub(super) struct AnalysisResult {
-    pub(super) analysis: CompletionAnalysis,
-    pub(super) expected: (Option<Type>, Option<ast::NameOrNameRef>),
+pub(super) struct AnalysisResult<'db> {
+    pub(super) analysis: CompletionAnalysis<'db>,
+    pub(super) expected: (Option<Type<'db>>, Option<ast::NameOrNameRef>),
     pub(super) qualifier_ctx: QualifierCtx,
     /// the original token of the expanded file
     pub(super) token: SyntaxToken,
@@ -48,13 +49,13 @@ pub(super) struct AnalysisResult {
     pub(super) original_offset: TextSize,
 }
 
-pub(super) fn expand_and_analyze(
-    sema: &Semantics<'_, RootDatabase>,
+pub(super) fn expand_and_analyze<'db>(
+    sema: &Semantics<'db, RootDatabase>,
     original_file: InFile<SyntaxNode>,
     speculative_file: SyntaxNode,
     offset: TextSize,
     original_token: &SyntaxToken,
-) -> Option<AnalysisResult> {
+) -> Option<AnalysisResult<'db>> {
     // as we insert after the offset, right biased will *always* pick the identifier no matter
     // if there is an ident already typed or not
     let fake_ident_token = speculative_file.token_at_offset(offset).right_biased()?;
@@ -286,24 +287,22 @@ fn expand(
                 &spec_attr,
                 fake_ident_token.clone(),
             ),
-        ) {
-            if let Some((fake_mapped_token, _)) =
-                fake_mapped_tokens.into_iter().min_by_key(|(_, rank)| *rank)
-            {
-                return Some(ExpansionResult {
-                    original_file: original_file.value,
-                    speculative_file,
-                    original_offset,
-                    speculative_offset: fake_ident_token.text_range().start(),
-                    fake_ident_token,
-                    derive_ctx: Some((
-                        actual_expansion,
-                        fake_expansion,
-                        fake_mapped_token.text_range().start(),
-                        orig_attr,
-                    )),
-                });
-            }
+        ) && let Some((fake_mapped_token, _)) =
+            fake_mapped_tokens.into_iter().min_by_key(|(_, rank)| *rank)
+        {
+            return Some(ExpansionResult {
+                original_file: original_file.value,
+                speculative_file,
+                original_offset,
+                speculative_offset: fake_ident_token.text_range().start(),
+                fake_ident_token,
+                derive_ctx: Some((
+                    actual_expansion,
+                    fake_expansion,
+                    fake_mapped_token.text_range().start(),
+                    orig_attr,
+                )),
+            });
         }
 
         if let Some(spec_adt) =
@@ -432,12 +431,13 @@ fn expand(
 
 /// Fill the completion context, this is what does semantic reasoning about the surrounding context
 /// of the completion location.
-fn analyze(
-    sema: &Semantics<'_, RootDatabase>,
+fn analyze<'db>(
+    sema: &Semantics<'db, RootDatabase>,
     expansion_result: ExpansionResult,
     original_token: &SyntaxToken,
     self_token: &SyntaxToken,
-) -> Option<(CompletionAnalysis, (Option<Type>, Option<ast::NameOrNameRef>), QualifierCtx)> {
+) -> Option<(CompletionAnalysis<'db>, (Option<Type<'db>>, Option<ast::NameOrNameRef>), QualifierCtx)>
+{
     let _p = tracing::info_span!("CompletionContext::analyze").entered();
     let ExpansionResult {
         original_file,
@@ -533,14 +533,13 @@ fn analyze(
                     NameRefKind::Path(PathCompletionCtx { kind: PathKind::Expr { .. }, path, .. }, ..),
                 ..
             } = &nameref_ctx
+                && is_in_token_of_for_loop(path)
             {
-                if is_in_token_of_for_loop(path) {
-                    // for pat $0
-                    // there is nothing to complete here except `in` keyword
-                    // don't bother populating the context
-                    // Ideally this special casing wouldn't be needed, but the parser recovers
-                    return None;
-                }
+                // for pat $0
+                // there is nothing to complete here except `in` keyword
+                // don't bother populating the context
+                // Ideally this special casing wouldn't be needed, but the parser recovers
+                return None;
             }
 
             qual_ctx = qualifier_ctx;
@@ -555,17 +554,17 @@ fn analyze(
 }
 
 /// Calculate the expected type and name of the cursor position.
-fn expected_type_and_name(
-    sema: &Semantics<'_, RootDatabase>,
+fn expected_type_and_name<'db>(
+    sema: &Semantics<'db, RootDatabase>,
     token: &SyntaxToken,
     name_like: &ast::NameLike,
-) -> (Option<Type>, Option<NameOrNameRef>) {
+) -> (Option<Type<'db>>, Option<NameOrNameRef>) {
     let mut node = match token.parent() {
         Some(it) => it,
         None => return (None, None),
     };
 
-    let strip_refs = |mut ty: Type| match name_like {
+    let strip_refs = |mut ty: Type<'db>| match name_like {
         ast::NameLike::NameRef(n) => {
             let p = match n.syntax().parent() {
                 Some(it) => it,
@@ -805,13 +804,13 @@ fn classify_name(
     Some(NameContext { name, kind })
 }
 
-fn classify_name_ref(
-    sema: &Semantics<'_, RootDatabase>,
+fn classify_name_ref<'db>(
+    sema: &Semantics<'db, RootDatabase>,
     original_file: &SyntaxNode,
     name_ref: ast::NameRef,
     original_offset: TextSize,
     parent: SyntaxNode,
-) -> Option<(NameRefContext, QualifierCtx)> {
+) -> Option<(NameRefContext<'db>, QualifierCtx)> {
     let nameref = find_node_at_offset(original_file, original_offset);
 
     let make_res = |kind| (NameRefContext { nameref: nameref.clone(), kind }, Default::default());
@@ -868,8 +867,15 @@ fn classify_name_ref(
                     return None;
                 }
 
+                let mut receiver_ty = receiver.as_ref().and_then(|it| sema.type_of_expr(it));
+                if receiver_is_ambiguous_float_literal {
+                    // `123.|` is parsed as a float but should actually be an integer.
+                    always!(receiver_ty.as_ref().is_none_or(|receiver_ty| receiver_ty.original.is_float()));
+                    receiver_ty = Some(TypeInfo { original: hir::BuiltinType::i32().ty(sema.db), adjusted: None });
+                }
+
                 let kind = NameRefKind::DotAccess(DotAccess {
-                    receiver_ty: receiver.as_ref().and_then(|it| sema.type_of_expr(it)),
+                    receiver_ty,
                     kind: DotAccessKind::Field { receiver_is_ambiguous_float_literal },
                     receiver,
                     ctx: DotAccessExprCtx { in_block_expr: is_in_block(field.syntax()), in_breakable: is_in_breakable(field.syntax()) }
@@ -942,29 +948,26 @@ fn classify_name_ref(
     let inbetween_body_and_decl_check = |node: SyntaxNode| {
         if let Some(NodeOrToken::Node(n)) =
             syntax::algo::non_trivia_sibling(node.into(), syntax::Direction::Prev)
+            && let Some(item) = ast::Item::cast(n)
         {
-            if let Some(item) = ast::Item::cast(n) {
-                let is_inbetween = match &item {
-                    ast::Item::Const(it) => it.body().is_none() && it.semicolon_token().is_none(),
-                    ast::Item::Enum(it) => it.variant_list().is_none(),
-                    ast::Item::ExternBlock(it) => it.extern_item_list().is_none(),
-                    ast::Item::Fn(it) => it.body().is_none() && it.semicolon_token().is_none(),
-                    ast::Item::Impl(it) => it.assoc_item_list().is_none(),
-                    ast::Item::Module(it) => {
-                        it.item_list().is_none() && it.semicolon_token().is_none()
-                    }
-                    ast::Item::Static(it) => it.body().is_none(),
-                    ast::Item::Struct(it) => {
-                        it.field_list().is_none() && it.semicolon_token().is_none()
-                    }
-                    ast::Item::Trait(it) => it.assoc_item_list().is_none(),
-                    ast::Item::TypeAlias(it) => it.ty().is_none() && it.semicolon_token().is_none(),
-                    ast::Item::Union(it) => it.record_field_list().is_none(),
-                    _ => false,
-                };
-                if is_inbetween {
-                    return Some(item);
+            let is_inbetween = match &item {
+                ast::Item::Const(it) => it.body().is_none() && it.semicolon_token().is_none(),
+                ast::Item::Enum(it) => it.variant_list().is_none(),
+                ast::Item::ExternBlock(it) => it.extern_item_list().is_none(),
+                ast::Item::Fn(it) => it.body().is_none() && it.semicolon_token().is_none(),
+                ast::Item::Impl(it) => it.assoc_item_list().is_none(),
+                ast::Item::Module(it) => it.item_list().is_none() && it.semicolon_token().is_none(),
+                ast::Item::Static(it) => it.body().is_none(),
+                ast::Item::Struct(it) => {
+                    it.field_list().is_none() && it.semicolon_token().is_none()
                 }
+                ast::Item::Trait(it) => it.assoc_item_list().is_none(),
+                ast::Item::TypeAlias(it) => it.ty().is_none() && it.semicolon_token().is_none(),
+                ast::Item::Union(it) => it.record_field_list().is_none(),
+                _ => false,
+            };
+            if is_inbetween {
+                return Some(item);
             }
         }
         None
@@ -1493,10 +1496,10 @@ fn classify_name_ref(
                 }
             };
         }
-    } else if let Some(segment) = path.segment() {
-        if segment.coloncolon_token().is_some() {
-            path_ctx.qualified = Qualified::Absolute;
-        }
+    } else if let Some(segment) = path.segment()
+        && segment.coloncolon_token().is_some()
+    {
+        path_ctx.qualified = Qualified::Absolute;
     }
 
     let mut qualifier_ctx = QualifierCtx::default();
@@ -1521,38 +1524,30 @@ fn classify_name_ref(
         if let Some(top) = top_node {
             if let Some(NodeOrToken::Node(error_node)) =
                 syntax::algo::non_trivia_sibling(top.clone().into(), syntax::Direction::Prev)
+                && error_node.kind() == SyntaxKind::ERROR
             {
-                if error_node.kind() == SyntaxKind::ERROR {
-                    for token in
-                        error_node.children_with_tokens().filter_map(NodeOrToken::into_token)
-                    {
-                        match token.kind() {
-                            SyntaxKind::UNSAFE_KW => qualifier_ctx.unsafe_tok = Some(token),
-                            SyntaxKind::ASYNC_KW => qualifier_ctx.async_tok = Some(token),
-                            SyntaxKind::SAFE_KW => qualifier_ctx.safe_tok = Some(token),
-                            _ => {}
-                        }
+                for token in error_node.children_with_tokens().filter_map(NodeOrToken::into_token) {
+                    match token.kind() {
+                        SyntaxKind::UNSAFE_KW => qualifier_ctx.unsafe_tok = Some(token),
+                        SyntaxKind::ASYNC_KW => qualifier_ctx.async_tok = Some(token),
+                        SyntaxKind::SAFE_KW => qualifier_ctx.safe_tok = Some(token),
+                        _ => {}
                     }
-                    qualifier_ctx.vis_node = error_node.children().find_map(ast::Visibility::cast);
                 }
+                qualifier_ctx.vis_node = error_node.children().find_map(ast::Visibility::cast);
             }
 
-            if let PathKind::Item { .. } = path_ctx.kind {
-                if qualifier_ctx.none() {
-                    if let Some(t) = top.first_token() {
-                        if let Some(prev) = t
-                            .prev_token()
-                            .and_then(|t| syntax::algo::skip_trivia_token(t, Direction::Prev))
-                        {
-                            if ![T![;], T!['}'], T!['{']].contains(&prev.kind()) {
-                                // This was inferred to be an item position path, but it seems
-                                // to be part of some other broken node which leaked into an item
-                                // list
-                                return None;
-                            }
-                        }
-                    }
-                }
+            if let PathKind::Item { .. } = path_ctx.kind
+                && qualifier_ctx.none()
+                && let Some(t) = top.first_token()
+                && let Some(prev) =
+                    t.prev_token().and_then(|t| syntax::algo::skip_trivia_token(t, Direction::Prev))
+                && ![T![;], T!['}'], T!['{']].contains(&prev.kind())
+            {
+                // This was inferred to be an item position path, but it seems
+                // to be part of some other broken node which leaked into an item
+                // list
+                return None;
             }
         }
     }

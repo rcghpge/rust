@@ -5,8 +5,7 @@ use std::mem;
 use rustc_ast as ast;
 use rustc_ast::entry::EntryPointType;
 use rustc_ast::mut_visit::*;
-use rustc_ast::ptr::P;
-use rustc_ast::visit::{Visitor, walk_item};
+use rustc_ast::visit::Visitor;
 use rustc_ast::{ModKind, attr};
 use rustc_errors::DiagCtxtHandle;
 use rustc_expand::base::{ExtCtxt, ResolverExpand};
@@ -142,15 +141,15 @@ impl<'a> MutVisitor for TestHarnessGenerator<'a> {
         if let ast::ItemKind::Mod(
             _,
             _,
-            ModKind::Loaded(.., ast::ModSpans { inner_span: span, .. }, _),
+            ModKind::Loaded(.., ast::ModSpans { inner_span: span, .. }),
         ) = item.kind
         {
             let prev_tests = mem::take(&mut self.tests);
-            walk_item_kind(&mut item.kind, item.span, item.id, &mut item.vis, (), self);
+            ast::mut_visit::walk_item(self, item);
             self.add_test_cases(item.id, span, prev_tests);
         } else {
             // But in those cases, we emit a lint to warn the user of these missing tests.
-            walk_item(&mut InnerItemLinter { sess: self.cx.ext_cx.sess }, &item);
+            ast::visit::walk_item(&mut InnerItemLinter { sess: self.cx.ext_cx.sess }, &item);
         }
     }
 }
@@ -227,7 +226,7 @@ fn generate_test_harness(
     panic_strategy: PanicStrategy,
     test_runner: Option<ast::Path>,
 ) {
-    let econfig = ExpansionConfig::default("test".to_string(), features);
+    let econfig = ExpansionConfig::default(sym::test, features);
     let ext_cx = ExtCtxt::new(sess, econfig, resolver, None);
 
     let expn_id = ext_cx.resolver.expansion_for_ast_pass(
@@ -284,7 +283,7 @@ fn generate_test_harness(
 /// [`TestCtxt::reexport_test_harness_main`] provides a different name for the `main`
 /// function and [`TestCtxt::test_runner`] provides a path that replaces
 /// `test::test_main_static`.
-fn mk_main(cx: &mut TestCtxt<'_>) -> P<ast::Item> {
+fn mk_main(cx: &mut TestCtxt<'_>) -> Box<ast::Item> {
     let sp = cx.def_site;
     let ecx = &cx.ext_cx;
     let test_ident = Ident::new(sym::test, sp);
@@ -348,7 +347,7 @@ fn mk_main(cx: &mut TestCtxt<'_>) -> P<ast::Item> {
         define_opaque: None,
     }));
 
-    let main = P(ast::Item {
+    let main = Box::new(ast::Item {
         attrs: thin_vec![main_attr, coverage_attr, doc_hidden_attr],
         id: ast::DUMMY_NODE_ID,
         kind: main,
@@ -364,7 +363,7 @@ fn mk_main(cx: &mut TestCtxt<'_>) -> P<ast::Item> {
 
 /// Creates a slice containing every test like so:
 /// &[&test1, &test2]
-fn mk_tests_slice(cx: &TestCtxt<'_>, sp: Span) -> P<ast::Expr> {
+fn mk_tests_slice(cx: &TestCtxt<'_>, sp: Span) -> Box<ast::Expr> {
     debug!("building test vector from {} tests", cx.test_cases.len());
     let ecx = &cx.ext_cx;
 

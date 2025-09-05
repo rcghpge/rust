@@ -137,10 +137,10 @@
 //! 2. An operation causes the value to depend on its own address not changing
 //!     * e.g. calling [`poll`] for the first time on the produced [`Future`]
 //! 3. Further pieces of the safe interface of the type use internal [`unsafe`] operations which
-//! assume that the address of the value is stable
+//!    assume that the address of the value is stable
 //!     * e.g. subsequent calls to [`poll`]
 //! 4. Before the value is invalidated (e.g. deallocated), it is *dropped*, giving it a chance to
-//! notify anything with pointers to itself that those pointers will be invalidated
+//!    notify anything with pointers to itself that those pointers will be invalidated
 //!     * e.g. [`drop`]ping the [`Future`] [^pin-drop-future]
 //!
 //! There are two possible ways to ensure the invariants required for 2. and 3. above (which
@@ -148,8 +148,8 @@
 //!
 //! 1. Have the value detect when it is moved and update all the pointers that point to itself.
 //! 2. Guarantee that the address of the value does not change (and that memory is not re-used
-//! for anything else) during the time that the pointers to it are expected to be valid to
-//! dereference.
+//!    for anything else) during the time that the pointers to it are expected to be valid to
+//!    dereference.
 //!
 //! Since, as we discussed, Rust can move values without notifying them that they have moved, the
 //! first option is ruled out.
@@ -160,11 +160,11 @@
 //! be able to enforce this invariant in Rust:
 //!
 //! 1. Offer a wholly `unsafe` API to interact with the object, thus requiring every caller to
-//! uphold the invariant themselves
+//!    uphold the invariant themselves
 //! 2. Store the value that must not be moved behind a carefully managed pointer internal to
-//! the object
+//!    the object
 //! 3. Leverage the type system to encode and enforce this invariant by presenting a restricted
-//! API surface to interact with *any* object that requires these invariants
+//!    API surface to interact with *any* object that requires these invariants
 //!
 //! The first option is quite obviously undesirable, as the [`unsafe`]ty of the interface will
 //! become viral throughout all code that interacts with the object.
@@ -530,7 +530,7 @@
 //! but it also implies that,
 //!
 //! 2. The memory location that stores the value must not get invalidated or otherwise repurposed
-//! during the lifespan of the pinned value until its [`drop`] returns or panics
+//!    during the lifespan of the pinned value until its [`drop`] returns or panics
 //!
 //! This point is subtle but required for intrusive data structures to be implemented soundly.
 //!
@@ -792,7 +792,7 @@
 //!
 //! 1.  *Structural [`Unpin`].* A struct can be [`Unpin`] only if all of its
 //!     structurally-pinned fields are, too. This is [`Unpin`]'s behavior by default.
-//!     However, as a libray author, it is your responsibility not to write something like
+//!     However, as a library author, it is your responsibility not to write something like
 //!     <code>impl\<T> [Unpin] for Struct\<T> {}</code> and then offer a method that provides
 //!     structural pinning to an inner field of `T`, which may not be [`Unpin`]! (Adding *any*
 //!     projection operation requires unsafe code, so the fact that [`Unpin`] is a safe trait does
@@ -1359,7 +1359,11 @@ impl<Ptr: Deref> Pin<Ptr> {
     /// ruled out by the contract of `Pin::new_unchecked`.
     #[stable(feature = "pin", since = "1.33.0")]
     #[inline(always)]
-    pub fn as_ref(&self) -> Pin<&Ptr::Target> {
+    #[rustc_const_unstable(feature = "const_convert", issue = "143773")]
+    pub const fn as_ref(&self) -> Pin<&Ptr::Target>
+    where
+        Ptr: [const] Deref,
+    {
         // SAFETY: see documentation on this function
         unsafe { Pin::new_unchecked(&*self.pointer) }
     }
@@ -1403,7 +1407,11 @@ impl<Ptr: DerefMut> Pin<Ptr> {
     /// ```
     #[stable(feature = "pin", since = "1.33.0")]
     #[inline(always)]
-    pub fn as_mut(&mut self) -> Pin<&mut Ptr::Target> {
+    #[rustc_const_unstable(feature = "const_convert", issue = "143773")]
+    pub const fn as_mut(&mut self) -> Pin<&mut Ptr::Target>
+    where
+        Ptr: [const] DerefMut,
+    {
         // SAFETY: see documentation on this function
         unsafe { Pin::new_unchecked(&mut *self.pointer) }
     }
@@ -1418,7 +1426,11 @@ impl<Ptr: DerefMut> Pin<Ptr> {
     #[stable(feature = "pin_deref_mut", since = "1.84.0")]
     #[must_use = "`self` will be dropped if the result is not used"]
     #[inline(always)]
-    pub fn as_deref_mut(self: Pin<&mut Self>) -> Pin<&mut Ptr::Target> {
+    #[rustc_const_unstable(feature = "const_convert", issue = "143773")]
+    pub const fn as_deref_mut(self: Pin<&mut Self>) -> Pin<&mut Ptr::Target>
+    where
+        Ptr: [const] DerefMut,
+    {
         // SAFETY: What we're asserting here is that going from
         //
         //     Pin<&mut Pin<Ptr>>
@@ -1669,7 +1681,8 @@ impl<T: ?Sized> Pin<&'static mut T> {
 }
 
 #[stable(feature = "pin", since = "1.33.0")]
-impl<Ptr: Deref> Deref for Pin<Ptr> {
+#[rustc_const_unstable(feature = "const_convert", issue = "143773")]
+impl<Ptr: [const] Deref> const Deref for Pin<Ptr> {
     type Target = Ptr::Target;
     fn deref(&self) -> &Ptr::Target {
         Pin::get_ref(Pin::as_ref(self))
@@ -1677,7 +1690,8 @@ impl<Ptr: Deref> Deref for Pin<Ptr> {
 }
 
 #[stable(feature = "pin", since = "1.33.0")]
-impl<Ptr: DerefMut<Target: Unpin>> DerefMut for Pin<Ptr> {
+#[rustc_const_unstable(feature = "const_convert", issue = "143773")]
+impl<Ptr: [const] DerefMut<Target: Unpin>> const DerefMut for Pin<Ptr> {
     fn deref_mut(&mut self) -> &mut Ptr::Target {
         Pin::get_mut(Pin::as_mut(self))
     }
@@ -1935,6 +1949,7 @@ unsafe impl<T: ?Sized> PinCoerceUnsized for *mut T {}
 #[stable(feature = "pin_macro", since = "1.68.0")]
 #[rustc_macro_transparency = "semitransparent"]
 #[allow_internal_unstable(super_let)]
+#[rustc_diagnostic_item = "pin_macro"]
 // `super` gets removed by rustfmt
 #[rustfmt::skip]
 pub macro pin($value:expr $(,)?) {

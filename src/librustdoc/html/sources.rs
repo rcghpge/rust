@@ -230,6 +230,7 @@ impl SourceCollector<'_, '_> {
         );
         let page = layout::Page {
             title: &title,
+            short_title: &src_fname.to_string_lossy(),
             css_class: "src",
             root_path: &root_path,
             static_root_path: shared.static_root_path.as_deref(),
@@ -353,7 +354,7 @@ pub(crate) fn print_src(
         );
         Ok(())
     });
-    let max_nb_digits = if lines > 0 { lines.ilog(10) + 1 } else { 1 };
+    let max_nb_digits = if lines > 0 { lines.ilog10() + 1 } else { 1 };
     match source_context {
         SourceContext::Standalone { file_path } => Source {
             code_html: code,

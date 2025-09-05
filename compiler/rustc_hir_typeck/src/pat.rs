@@ -16,7 +16,7 @@ use rustc_hir::{
     PatExprKind, PatKind, expr_needs_parens,
 };
 use rustc_hir_analysis::autoderef::report_autoderef_recursion_limit_error;
-use rustc_infer::infer;
+use rustc_infer::infer::RegionVariableOrigin;
 use rustc_middle::traits::PatternOriginExpr;
 use rustc_middle::ty::{self, Ty, TypeVisitableExt};
 use rustc_middle::{bug, span_bug};
@@ -24,7 +24,6 @@ use rustc_session::lint::builtin::NON_EXHAUSTIVE_OMITTED_PATTERNS;
 use rustc_session::parse::feature_err;
 use rustc_span::edit_distance::find_best_match_for_name;
 use rustc_span::edition::Edition;
-use rustc_span::hygiene::DesugaringKind;
 use rustc_span::source_map::Spanned;
 use rustc_span::{BytePos, DUMMY_SP, Ident, Span, kw, sym};
 use rustc_trait_selection::infer::InferCtxtExt;
@@ -606,7 +605,15 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             },
             PatKind::Struct(_, fields, has_rest_pat) => match opt_path_res.unwrap() {
                 Ok(ResolvedPat { ty, kind: ResolvedPatKind::Struct { variant } }) => self
-                    .check_pat_struct(pat, fields, has_rest_pat, ty, variant, expected, pat_info),
+                    .check_pat_struct(
+                        pat,
+                        fields,
+                        has_rest_pat.is_some(),
+                        ty,
+                        variant,
+                        expected,
+                        pat_info,
+                    ),
                 Err(guar) => {
                     let ty_err = Ty::new_error(self.tcx, guar);
                     for field in fields {
@@ -723,7 +730,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             // This is maximally flexible, allowing e.g., `Some(mut x) | &Some(mut x)`.
             // In that example, `Some(mut x)` results in `Peel` whereas `&Some(mut x)` in `Reset`.
             | PatKind::Or(_)
-            // Like or-patterns, guard patterns just propogate to their subpatterns.
+            // Like or-patterns, guard patterns just propagate to their subpatterns.
             | PatKind::Guard(..) => AdjustMode::Pass,
         }
     }
@@ -902,16 +909,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // then that's equivalent to there existing a LUB.
         let cause = self.pattern_cause(ti, span);
         if let Err(err) = self.demand_suptype_with_origin(&cause, expected, pat_ty) {
-            err.emit_unless(
-                ti.span
-                    .filter(|&s| {
-                        // In the case of `if`- and `while`-expressions we've already checked
-                        // that `scrutinee: bool`. We know that the pattern is `true`,
-                        // so an error here would be a duplicate and from the wrong POV.
-                        s.is_desugaring(DesugaringKind::CondTemporary)
-                    })
-                    .is_some(),
-            );
+            err.emit();
         }
 
         pat_ty
@@ -1766,7 +1764,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let missing_parentheses = match (expected.kind(), fields, had_err) {
             // #67037: only do this if we could successfully type-check the expected type against
             // the tuple struct pattern. Otherwise the args could get out of range on e.g.,
-            // `let P() = U;` where `P != U` with `struct P<T>(T);`.
+            // `let P() = U;` where `P != U` with `struct Box<T>(T);`.
             (ty::Adt(_, args), [field], Ok(())) => {
                 let field_ty = self.field_ty(pat_span, field, args);
                 match field_ty.kind() {
@@ -2438,7 +2436,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let len = unmentioned_fields.len();
         let (prefix, postfix, sp) = match fields {
             [] => match &pat.kind {
-                PatKind::Struct(path, [], false) => {
+                PatKind::Struct(path, [], None) => {
                     (" { ", " }", path.span().shrink_to_hi().until(pat.span.shrink_to_hi()))
                 }
                 _ => return err,
@@ -2777,7 +2775,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
     /// Create a reference type with a fresh region variable.
     fn new_ref_ty(&self, span: Span, mutbl: Mutability, ty: Ty<'tcx>) -> Ty<'tcx> {
-        let region = self.next_region_var(infer::PatternRegion(span));
+        let region = self.next_region_var(RegionVariableOrigin::PatternRegion(span));
         Ty::new_ref(self.tcx, region, ty, mutbl)
     }
 

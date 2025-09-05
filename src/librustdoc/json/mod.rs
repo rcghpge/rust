@@ -18,7 +18,6 @@ use rustc_data_structures::fx::FxHashSet;
 use rustc_hir::def_id::{DefId, DefIdSet};
 use rustc_middle::ty::TyCtxt;
 use rustc_session::Session;
-use rustc_session::features::StabilityExt;
 use rustc_span::def_id::LOCAL_CRATE;
 use rustdoc_json_types as types;
 // It's important to use the FxHashMap from rustdoc_json_types here, instead of
@@ -134,7 +133,7 @@ fn target(sess: &rustc_session::Session) -> types::Target {
     let feature_stability: FxHashMap<&str, Stability> = sess
         .target
         .rust_target_features()
-        .into_iter()
+        .iter()
         .copied()
         .map(|(name, stability, _)| (name, stability))
         .collect();
@@ -144,11 +143,11 @@ fn target(sess: &rustc_session::Session) -> types::Target {
         target_features: sess
             .target
             .rust_target_features()
-            .into_iter()
+            .iter()
             .copied()
             .filter(|(_, stability, _)| {
                 // Describe only target features which the user can toggle
-                stability.is_toggle_permitted(sess).is_ok()
+                stability.toggle_allowed().is_ok()
             })
             .map(|(name, stability, implied_features)| {
                 types::TargetFeature {
@@ -158,13 +157,13 @@ fn target(sess: &rustc_session::Session) -> types::Target {
                         _ => None,
                     },
                     implies_features: implied_features
-                        .into_iter()
+                        .iter()
                         .copied()
                         .filter(|name| {
                             // Imply only target features which the user can toggle
                             feature_stability
                                 .get(name)
-                                .map(|stability| stability.is_toggle_permitted(sess).is_ok())
+                                .map(|stability| stability.toggle_allowed().is_ok())
                                 .unwrap_or(false)
                         })
                         .map(String::from)
@@ -176,15 +175,8 @@ fn target(sess: &rustc_session::Session) -> types::Target {
     }
 }
 
-impl<'tcx> FormatRenderer<'tcx> for JsonRenderer<'tcx> {
-    fn descr() -> &'static str {
-        "json"
-    }
-
-    const RUN_ON_MODULE: bool = false;
-    type ModuleData = ();
-
-    fn init(
+impl<'tcx> JsonRenderer<'tcx> {
+    pub(crate) fn init(
         krate: clean::Crate,
         options: RenderOptions,
         cache: Cache,
@@ -206,6 +198,15 @@ impl<'tcx> FormatRenderer<'tcx> for JsonRenderer<'tcx> {
             krate,
         ))
     }
+}
+
+impl<'tcx> FormatRenderer<'tcx> for JsonRenderer<'tcx> {
+    fn descr() -> &'static str {
+        "json"
+    }
+
+    const RUN_ON_MODULE: bool = false;
+    type ModuleData = ();
 
     fn save_module_data(&mut self) -> Self::ModuleData {
         unreachable!("RUN_ON_MODULE = false, should never call save_module_data")
@@ -377,8 +378,34 @@ impl<'tcx> FormatRenderer<'tcx> for JsonRenderer<'tcx> {
             self.serialize_and_write(output_crate, BufWriter::new(stdout().lock()), "<stdout>")
         }
     }
+}
 
-    fn cache(&self) -> &Cache {
-        &self.cache
-    }
+// Some nodes are used a lot. Make sure they don't unintentionally get bigger.
+//
+// These assertions are here, not in `src/rustdoc-json-types/lib.rs` where the types are defined,
+// because we have access to `static_assert_size` here.
+#[cfg(target_pointer_width = "64")]
+mod size_asserts {
+    use rustc_data_structures::static_assert_size;
+
+    use super::types::*;
+    // tidy-alphabetical-start
+    static_assert_size!(AssocItemConstraint, 112);
+    static_assert_size!(Crate, 184);
+    static_assert_size!(ExternalCrate, 48);
+    static_assert_size!(FunctionPointer, 168);
+    static_assert_size!(GenericArg, 80);
+    static_assert_size!(GenericArgs, 104);
+    static_assert_size!(GenericBound, 72);
+    static_assert_size!(GenericParamDef, 136);
+    static_assert_size!(Impl, 304);
+    // `Item` contains a `PathBuf`, which is different sizes on different OSes.
+    static_assert_size!(Item, 528 + size_of::<std::path::PathBuf>());
+    static_assert_size!(ItemSummary, 32);
+    static_assert_size!(PolyTrait, 64);
+    static_assert_size!(PreciseCapturingArg, 32);
+    static_assert_size!(TargetFeature, 80);
+    static_assert_size!(Type, 80);
+    static_assert_size!(WherePredicate, 160);
+    // tidy-alphabetical-end
 }

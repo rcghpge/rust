@@ -2,7 +2,6 @@ use std::fmt::Write;
 
 use ast::{ForLoopKind, MatchKind};
 use itertools::{Itertools, Position};
-use rustc_ast::ptr::P;
 use rustc_ast::util::classify;
 use rustc_ast::util::literal::escape_byte_str_symbol;
 use rustc_ast::util::parser::{self, ExprPrecedence, Fixity};
@@ -54,7 +53,7 @@ impl<'a> State<'a> {
         self.print_else(elseopt)
     }
 
-    fn print_call_post(&mut self, args: &[P<ast::Expr>]) {
+    fn print_call_post(&mut self, args: &[Box<ast::Expr>]) {
         self.popen();
         self.commasep_exprs(Inconsistent, args);
         self.pclose()
@@ -111,7 +110,7 @@ impl<'a> State<'a> {
         }
     }
 
-    fn print_expr_vec(&mut self, exprs: &[P<ast::Expr>]) {
+    fn print_expr_vec(&mut self, exprs: &[Box<ast::Expr>]) {
         let ib = self.ibox(INDENT_UNIT);
         self.word("[");
         self.commasep_exprs(Inconsistent, exprs);
@@ -149,7 +148,7 @@ impl<'a> State<'a> {
 
     fn print_expr_struct(
         &mut self,
-        qself: &Option<P<ast::QSelf>>,
+        qself: &Option<Box<ast::QSelf>>,
         path: &ast::Path,
         fields: &[ast::ExprField],
         rest: &ast::StructRest,
@@ -204,7 +203,7 @@ impl<'a> State<'a> {
         self.word("}");
     }
 
-    fn print_expr_tup(&mut self, exprs: &[P<ast::Expr>]) {
+    fn print_expr_tup(&mut self, exprs: &[Box<ast::Expr>]) {
         self.popen();
         self.commasep_exprs(Inconsistent, exprs);
         if exprs.len() == 1 {
@@ -213,7 +212,7 @@ impl<'a> State<'a> {
         self.pclose()
     }
 
-    fn print_expr_call(&mut self, func: &ast::Expr, args: &[P<ast::Expr>], fixup: FixupContext) {
+    fn print_expr_call(&mut self, func: &ast::Expr, args: &[Box<ast::Expr>], fixup: FixupContext) {
         // Independent of parenthesization related to precedence, we must
         // parenthesize `func` if this is a statement context in which without
         // parentheses, a statement boundary would occur inside `func` or
@@ -247,7 +246,7 @@ impl<'a> State<'a> {
         &mut self,
         segment: &ast::PathSegment,
         receiver: &ast::Expr,
-        base_args: &[P<ast::Expr>],
+        base_args: &[Box<ast::Expr>],
         fixup: FixupContext,
     ) {
         // The fixup here is different than in `print_expr_call` because
@@ -357,6 +356,10 @@ impl<'a> State<'a> {
                 self.word_nbsp("raw");
                 self.print_mutability(mutability, true);
             }
+            ast::BorrowKind::Pin => {
+                self.word_nbsp("pin");
+                self.print_mutability(mutability, true);
+            }
         }
         self.print_expr_cond_paren(
             expr,
@@ -386,18 +389,44 @@ impl<'a> State<'a> {
 
         let ib = self.ibox(INDENT_UNIT);
 
-        // The Match subexpression in `match x {} - 1` must be parenthesized if
-        // it is the leftmost subexpression in a statement:
-        //
-        //     (match x {}) - 1;
-        //
-        // But not otherwise:
-        //
-        //     let _ = match x {} - 1;
-        //
-        // Same applies to a small set of other expression kinds which eagerly
-        // terminate a statement which opens with them.
-        let needs_par = fixup.would_cause_statement_boundary(expr);
+        let needs_par = {
+            // The Match subexpression in `match x {} - 1` must be parenthesized
+            // if it is the leftmost subexpression in a statement:
+            //
+            //     (match x {}) - 1;
+            //
+            // But not otherwise:
+            //
+            //     let _ = match x {} - 1;
+            //
+            // Same applies to a small set of other expression kinds which
+            // eagerly terminate a statement which opens with them.
+            fixup.would_cause_statement_boundary(expr)
+        } || {
+            // If a binary operation ends up with an attribute, such as
+            // resulting from the following macro expansion, then parentheses
+            // are required so that the attribute encompasses the right
+            // subexpression and not just the left one.
+            //
+            //     #![feature(stmt_expr_attributes)]
+            //
+            //     macro_rules! add_attr {
+            //         ($e:expr) => { #[attr] $e };
+            //     }
+            //
+            //     let _ = add_attr!(1 + 1);
+            //
+            // We must pretty-print `#[attr] (1 + 1)` not `#[attr] 1 + 1`.
+            !attrs.is_empty()
+                && matches!(
+                    expr.kind,
+                    ast::ExprKind::Binary(..)
+                        | ast::ExprKind::Cast(..)
+                        | ast::ExprKind::Assign(..)
+                        | ast::ExprKind::AssignOp(..)
+                        | ast::ExprKind::Range(..)
+                )
+        };
         if needs_par {
             self.popen();
             fixup = FixupContext::default();
@@ -439,8 +468,12 @@ impl<'a> State<'a> {
             ast::ExprKind::Lit(token_lit) => {
                 self.print_token_literal(*token_lit, expr.span);
             }
-            ast::ExprKind::IncludedBytes(bytes) => {
-                let lit = token::Lit::new(token::ByteStr, escape_byte_str_symbol(bytes), None);
+            ast::ExprKind::IncludedBytes(byte_sym) => {
+                let lit = token::Lit::new(
+                    token::ByteStr,
+                    escape_byte_str_symbol(byte_sym.as_byte_str()),
+                    None,
+                );
                 self.print_token_literal(lit, expr.span)
             }
             ast::ExprKind::Cast(expr, ty) => {

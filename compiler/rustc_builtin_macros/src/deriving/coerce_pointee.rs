@@ -108,11 +108,7 @@ pub(crate) fn expand_deriving_coerce_pointee(
             cx.item(
                 span,
                 attrs.clone(),
-                ast::ItemKind::Impl(Box::new(ast::Impl {
-                    safety: ast::Safety::Default,
-                    polarity: ast::ImplPolarity::Positive,
-                    defaultness: ast::Defaultness::Final,
-                    constness: ast::Const::No,
+                ast::ItemKind::Impl(ast::Impl {
                     generics: Generics {
                         params: generics
                             .params
@@ -124,7 +120,7 @@ pub(crate) fn expand_deriving_coerce_pointee(
                                 GenericParamKind::Type { default: _ } => {
                                     cx.typaram(p.span(), p.ident, p.bounds.clone(), None)
                                 }
-                                GenericParamKind::Const { ty, kw_span: _, default: _ } => cx
+                                GenericParamKind::Const { ty, span: _, default: _ } => cx
                                     .const_param(
                                         p.span(),
                                         p.ident,
@@ -137,10 +133,16 @@ pub(crate) fn expand_deriving_coerce_pointee(
                         where_clause: generics.where_clause.clone(),
                         span: generics.span,
                     },
-                    of_trait: Some(trait_ref),
+                    of_trait: Some(Box::new(ast::TraitImplHeader {
+                        safety: ast::Safety::Default,
+                        polarity: ast::ImplPolarity::Positive,
+                        defaultness: ast::Defaultness::Final,
+                        constness: ast::Const::No,
+                        trait_ref,
+                    })),
                     self_ty: self_type.clone(),
                     items: ThinVec::new(),
-                })),
+                }),
             ),
         ));
     }
@@ -152,16 +154,18 @@ pub(crate) fn expand_deriving_coerce_pointee(
         let item = cx.item(
             span,
             attrs.clone(),
-            ast::ItemKind::Impl(Box::new(ast::Impl {
-                safety: ast::Safety::Default,
-                polarity: ast::ImplPolarity::Positive,
-                defaultness: ast::Defaultness::Final,
-                constness: ast::Const::No,
+            ast::ItemKind::Impl(ast::Impl {
                 generics,
-                of_trait: Some(trait_ref),
+                of_trait: Some(Box::new(ast::TraitImplHeader {
+                    safety: ast::Safety::Default,
+                    polarity: ast::ImplPolarity::Positive,
+                    defaultness: ast::Defaultness::Final,
+                    constness: ast::Const::No,
+                    trait_ref,
+                })),
                 self_ty: self_type.clone(),
                 items: ThinVec::new(),
-            })),
+            }),
         );
         push(Annotatable::Item(item));
     };

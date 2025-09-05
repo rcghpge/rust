@@ -1,5 +1,3 @@
-#![allow(rustc::usage_of_ty_tykind)]
-
 /// This higher-order macro declares a list of types which can be allocated by `Arena`.
 ///
 /// Specifying the `decode` modifier will add decode impls for `&T` and `&[T]` where `T` is the type
@@ -82,6 +80,7 @@ macro_rules! arena_types {
                 rustc_middle::infer::canonical::Canonical<'tcx,
                     rustc_middle::infer::canonical::QueryResponse<'tcx, rustc_middle::ty::Ty<'tcx>>
                 >,
+            [] inspect_probe: rustc_middle::traits::solve::inspect::Probe<rustc_middle::ty::TyCtxt<'tcx>>,
             [] effective_visibilities: rustc_middle::middle::privacy::EffectiveVisibilities,
             [] upvars_mentioned: rustc_data_structures::fx::FxIndexMap<rustc_hir::HirId, rustc_hir::Upvar>,
             [] dyn_compatibility_violations: rustc_middle::traits::DynCompatibilityViolation,
@@ -112,7 +111,7 @@ macro_rules! arena_types {
             [] external_constraints: rustc_middle::traits::solve::ExternalConstraintsData<rustc_middle::ty::TyCtxt<'tcx>>,
             [] predefined_opaques_in_body: rustc_middle::traits::solve::PredefinedOpaquesData<rustc_middle::ty::TyCtxt<'tcx>>,
             [decode] doc_link_resolutions: rustc_hir::def::DocLinkResMap,
-            [] stripped_cfg_items: rustc_ast::expand::StrippedCfgItem,
+            [] stripped_cfg_items: rustc_hir::attrs::StrippedCfgItem,
             [] mod_child: rustc_middle::metadata::ModChild,
             [] features: rustc_feature::Features,
             [decode] specialization_graph: rustc_middle::traits::specialization_graph::Graph,

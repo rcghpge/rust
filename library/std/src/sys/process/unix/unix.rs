@@ -18,8 +18,8 @@ use crate::sys::cvt;
 use crate::sys::pal::linux::pidfd::PidFd;
 use crate::{fmt, mem, sys};
 
-cfg_if::cfg_if! {
-    if #[cfg(target_os = "nto")] {
+cfg_select! {
+    target_os = "nto" => {
         use crate::thread;
         use libc::{c_char, posix_spawn_file_actions_t, posix_spawnattr_t};
         use crate::time::Duration;
@@ -43,6 +43,7 @@ cfg_if::cfg_if! {
         // Maximum duration of sleeping before giving up and returning an error
         const MAX_FORKSPAWN_SLEEP: Duration = Duration::from_millis(1000);
     }
+    _ => {}
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -340,6 +341,10 @@ impl Command {
             cvt(libc::setpgid(0, pgroup))?;
         }
 
+        if self.get_setsid() {
+            cvt(libc::setsid())?;
+        }
+
         // emscripten has no signal support.
         #[cfg(not(target_os = "emscripten"))]
         {
@@ -461,8 +466,8 @@ impl Command {
             return Ok(None);
         }
 
-        cfg_if::cfg_if! {
-            if #[cfg(target_os = "linux")] {
+        cfg_select! {
+            target_os = "linux" => {
                 use crate::sys::weak::weak;
 
                 weak!(
@@ -522,7 +527,8 @@ impl Command {
                     }
                     core::assert_matches::debug_assert_matches!(support, SPAWN | NO);
                 }
-            } else {
+            }
+            _ => {
                 if self.get_create_pidfd() {
                     unreachable!("only implemented on linux")
                 }
@@ -739,6 +745,17 @@ impl Command {
                     default_set.as_ptr(),
                 ))?;
                 flags |= libc::POSIX_SPAWN_SETSIGDEF;
+            }
+
+            if self.get_setsid() {
+                cfg_select! {
+                    all(target_os = "linux", target_env = "gnu") => {
+                        flags |= libc::POSIX_SPAWN_SETSID;
+                    }
+                    _ => {
+                        return Ok(None);
+                    }
+                }
             }
 
             cvt_nz(libc::posix_spawnattr_setflags(attrs.0.as_mut_ptr(), flags as _))?;
@@ -963,9 +980,13 @@ impl Process {
         self.pid as u32
     }
 
-    pub fn kill(&mut self) -> io::Result<()> {
-        // If we've already waited on this process then the pid can be recycled
-        // and used for another process, and we probably shouldn't be killing
+    pub fn kill(&self) -> io::Result<()> {
+        self.send_signal(libc::SIGKILL)
+    }
+
+    pub(crate) fn send_signal(&self, signal: i32) -> io::Result<()> {
+        // If we've already waited on this process then the pid can be recycled and
+        // used for another process, and we probably shouldn't be sending signals to
         // random processes, so return Ok because the process has exited already.
         if self.status.is_some() {
             return Ok(());
@@ -973,9 +994,9 @@ impl Process {
         #[cfg(target_os = "linux")]
         if let Some(pid_fd) = self.pidfd.as_ref() {
             // pidfd_send_signal predates pidfd_open. so if we were able to get an fd then sending signals will work too
-            return pid_fd.kill();
+            return pid_fd.send_signal(signal);
         }
-        cvt(unsafe { libc::kill(self.pid, libc::SIGKILL) }).map(drop)
+        cvt(unsafe { libc::kill(self.pid, signal) }).map(drop)
     }
 
     pub fn wait(&mut self) -> io::Result<ExitStatus> {

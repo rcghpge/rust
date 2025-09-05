@@ -164,3 +164,31 @@ fn issue14722() {
         None
     };
 }
+
+fn issue14799() {
+    if true {
+        #[cfg(target_os = "freebsd")]
+        todo!();
+
+        if true {}
+    };
+}
+
+fn in_parens() {
+    if true {
+        (if true {
+            println!("In parens, linted");
+        })
+    }
+    //~^^^^^ collapsible_if
+}
+
+fn in_brackets() {
+    if true {
+        {
+            if true {
+                println!("In brackets, not linted");
+            }
+        }
+    }
+}

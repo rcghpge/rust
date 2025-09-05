@@ -299,7 +299,7 @@ impl Analysis {
 
     /// Gets the text of the source file.
     pub fn file_text(&self, file_id: FileId) -> Cancellable<Arc<str>> {
-        self.with_db(|db| SourceDatabase::file_text(db, file_id).text(db))
+        self.with_db(|db| SourceDatabase::file_text(db, file_id).text(db).clone())
     }
 
     /// Gets the syntax tree of the file.
@@ -409,7 +409,7 @@ impl Analysis {
         self.with_db(|db| typing::on_enter(db, position))
     }
 
-    pub const SUPPORTED_TRIGGER_CHARS: &'static str = typing::TRIGGER_CHARS;
+    pub const SUPPORTED_TRIGGER_CHARS: &[char] = typing::TRIGGER_CHARS;
 
     /// Returns an edit which should be applied after a character was typed.
     ///
@@ -421,7 +421,7 @@ impl Analysis {
         char_typed: char,
     ) -> Cancellable<Option<SourceChange>> {
         // Fast path to not even parse the file.
-        if !typing::TRIGGER_CHARS.contains(char_typed) {
+        if !typing::TRIGGER_CHARS.contains(&char_typed) {
             return Ok(None);
         }
 

@@ -31,15 +31,6 @@ pub(crate) trait FormatRenderer<'tcx>: Sized {
     /// reset the information between each call to `item` by using `restore_module_data`.
     type ModuleData;
 
-    /// Sets up any state required for the renderer. When this is called the cache has already been
-    /// populated.
-    fn init(
-        krate: clean::Crate,
-        options: RenderOptions,
-        cache: Cache,
-        tcx: TyCtxt<'tcx>,
-    ) -> Result<(Self, clean::Crate), Error>;
-
     /// This method is called right before call [`Self::item`]. This method returns a type
     /// containing information that needs to be reset after the [`Self::item`] method has been
     /// called with the [`Self::restore_module_data`] method.
@@ -68,8 +59,6 @@ pub(crate) trait FormatRenderer<'tcx>: Sized {
 
     /// Post processing hook for cleanup and dumping output to files.
     fn after_krate(self) -> Result<(), Error>;
-
-    fn cache(&self) -> &Cache;
 }
 
 fn run_format_inner<'tcx, T: FormatRenderer<'tcx>>(
@@ -83,7 +72,7 @@ fn run_format_inner<'tcx, T: FormatRenderer<'tcx>>(
         let _timer =
             prof.generic_activity_with_arg("render_mod_item", item.name.unwrap().to_string());
 
-        cx.mod_item_in(&item)?;
+        cx.mod_item_in(item)?;
         let (clean::StrippedItem(box clean::ModuleItem(ref module))
         | clean::ModuleItem(ref module)) = item.inner.kind
         else {
@@ -101,24 +90,29 @@ fn run_format_inner<'tcx, T: FormatRenderer<'tcx>>(
     } else if let Some(item_name) = item.name
         && !item.is_extern_crate()
     {
-        prof.generic_activity_with_arg("render_item", item_name.as_str()).run(|| cx.item(&item))?;
+        prof.generic_activity_with_arg("render_item", item_name.as_str()).run(|| cx.item(item))?;
     }
     Ok(())
 }
 
 /// Main method for rendering a crate.
-pub(crate) fn run_format<'tcx, T: FormatRenderer<'tcx>>(
+pub(crate) fn run_format<
+    'tcx,
+    T: FormatRenderer<'tcx>,
+    F: FnOnce(clean::Crate, RenderOptions, Cache, TyCtxt<'tcx>) -> Result<(T, clean::Crate), Error>,
+>(
     krate: clean::Crate,
     options: RenderOptions,
     cache: Cache,
     tcx: TyCtxt<'tcx>,
+    init: F,
 ) -> Result<(), Error> {
     let prof = &tcx.sess.prof;
 
     let emit_crate = options.should_emit_crate();
     let (mut format_renderer, krate) = prof
         .verbose_generic_activity_with_arg("create_renderer", T::descr())
-        .run(|| T::init(krate, options, cache, tcx))?;
+        .run(|| init(krate, options, cache, tcx))?;
 
     if !emit_crate {
         return Ok(());

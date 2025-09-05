@@ -151,18 +151,6 @@ fn main() {
             cmd.arg("--sysroot").arg(&sysroot);
         }
 
-        // If we're compiling specifically the `panic_abort` crate then we pass
-        // the `-C panic=abort` option. Note that we do not do this for any
-        // other crate intentionally as this is the only crate for now that we
-        // ship with panic=abort.
-        //
-        // This... is a bit of a hack how we detect this. Ideally this
-        // information should be encoded in the crate I guess? Would likely
-        // require an RFC amendment to RFC 1513, however.
-        if crate_name == Some("panic_abort") {
-            cmd.arg("-C").arg("panic=abort");
-        }
-
         let crate_type = parse_value_from_args(&orig_args, "--crate-type");
         // `-Ztls-model=initial-exec` must not be applied to proc-macros, see
         // issue https://github.com/rust-lang/rust/issues/100530
@@ -188,6 +176,16 @@ fn main() {
     if let Ok(maps) = env::var("RUSTC_CARGO_REGISTRY_SRC_TO_REMAP") {
         for map in maps.split('\t') {
             cmd.arg("--remap-path-prefix").arg(map);
+        }
+    }
+
+    // Here we pass additional paths that essentially act as a sysroot.
+    // These are used to load rustc crates (e.g. `extern crate rustc_ast;`)
+    // for rustc_private tools, so that we do not have to copy them into the
+    // actual sysroot of the compiler that builds the tool.
+    if let Ok(dirs) = env::var("RUSTC_ADDITIONAL_SYSROOT_PATHS") {
+        for dir in dirs.split(",") {
+            cmd.arg(format!("-L{dir}"));
         }
     }
 
@@ -270,7 +268,7 @@ fn main() {
         eprintln!("{prefix} libdir: {libdir:?}");
     }
 
-    maybe_dump(format!("stage{stage}-rustc"), &cmd);
+    maybe_dump(format!("stage{}-rustc", stage + 1), &cmd);
 
     let start = Instant::now();
     let (child, status) = {

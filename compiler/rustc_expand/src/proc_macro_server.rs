@@ -250,12 +250,14 @@ impl FromInternal<(TokenStream, &mut Rustc<'_, '_>)> for Vec<TokenTree<TokenStre
                 Question => op("?"),
                 SingleQuote => op("'"),
 
-                Ident(sym, is_raw) => {
-                    trees.push(TokenTree::Ident(Ident { sym, is_raw: is_raw.into(), span }))
-                }
+                Ident(sym, is_raw) => trees.push(TokenTree::Ident(Ident {
+                    sym,
+                    is_raw: matches!(is_raw, IdentIsRaw::Yes),
+                    span,
+                })),
                 NtIdent(ident, is_raw) => trees.push(TokenTree::Ident(Ident {
                     sym: ident.name,
-                    is_raw: is_raw.into(),
+                    is_raw: matches!(is_raw, IdentIsRaw::Yes),
                     span: ident.span,
                 })),
 
@@ -263,7 +265,11 @@ impl FromInternal<(TokenStream, &mut Rustc<'_, '_>)> for Vec<TokenTree<TokenStre
                     let ident = rustc_span::Ident::new(name, span).without_first_quote();
                     trees.extend([
                         TokenTree::Punct(Punct { ch: b'\'', joint: true, span }),
-                        TokenTree::Ident(Ident { sym: ident.name, is_raw: is_raw.into(), span }),
+                        TokenTree::Ident(Ident {
+                            sym: ident.name,
+                            is_raw: matches!(is_raw, IdentIsRaw::Yes),
+                            span,
+                        }),
                     ]);
                 }
                 NtLifetime(ident, is_raw) => {
@@ -599,8 +605,12 @@ impl server::TokenStream for Rustc<'_, '_> {
             ast::ExprKind::Lit(token_lit) => {
                 Ok(tokenstream::TokenStream::token_alone(token::Literal(*token_lit), expr.span))
             }
-            ast::ExprKind::IncludedBytes(bytes) => {
-                let lit = token::Lit::new(token::ByteStr, escape_byte_str_symbol(bytes), None);
+            ast::ExprKind::IncludedBytes(byte_sym) => {
+                let lit = token::Lit::new(
+                    token::ByteStr,
+                    escape_byte_str_symbol(byte_sym.as_byte_str()),
+                    None,
+                );
                 Ok(tokenstream::TokenStream::token_alone(token::TokenKind::Literal(lit), expr.span))
             }
             ast::ExprKind::Unary(ast::UnOp::Neg, e) => match &e.kind {
@@ -677,7 +687,7 @@ impl server::Span for Rustc<'_, '_> {
             .lookup_char_pos(span.lo())
             .file
             .name
-            .prefer_remapped_unconditionaly()
+            .prefer_remapped_unconditionally()
             .to_string()
     }
 

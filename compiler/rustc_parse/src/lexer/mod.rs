@@ -1,6 +1,4 @@
-use std::ops::Range;
-
-use diagnostics::make_unclosed_delims_error;
+use diagnostics::make_errors_for_mismatched_closing_delims;
 use rustc_ast::ast::{self, AttrStyle};
 use rustc_ast::token::{self, CommentKind, Delimiter, IdentIsRaw, Token, TokenKind};
 use rustc_ast::tokenstream::TokenStream;
@@ -8,9 +6,9 @@ use rustc_ast::util::unicode::{TEXT_FLOW_CONTROL_CHARS, contains_text_flow_contr
 use rustc_errors::codes::*;
 use rustc_errors::{Applicability, Diag, DiagCtxtHandle, StashKey};
 use rustc_lexer::{
-    Base, Cursor, DocStyle, FrontmatterAllowed, LiteralKind, RawStrError, is_whitespace,
+    Base, Cursor, DocStyle, FrontmatterAllowed, LiteralKind, RawStrError, is_horizontal_whitespace,
 };
-use rustc_literal_escaper::{EscapeError, Mode, unescape_mixed, unescape_unicode};
+use rustc_literal_escaper::{EscapeError, Mode, check_for_errors};
 use rustc_session::lint::BuiltinLintDiag;
 use rustc_session::lint::builtin::{
     RUST_2021_PREFIXES_INCOMPATIBLE_SYNTAX, RUST_2024_GUARDED_STRING_INCOMPATIBLE_SYNTAX,
@@ -51,6 +49,7 @@ pub(crate) fn lex_token_trees<'psess, 'src>(
     mut src: &'src str,
     mut start_pos: BytePos,
     override_span: Option<Span>,
+    frontmatter_allowed: FrontmatterAllowed,
 ) -> Result<TokenStream, Vec<Diag<'psess>>> {
     // Skip `#!`, if present.
     if let Some(shebang_len) = rustc_lexer::strip_shebang(src) {
@@ -58,7 +57,7 @@ pub(crate) fn lex_token_trees<'psess, 'src>(
         start_pos = start_pos + BytePos::from_usize(shebang_len);
     }
 
-    let cursor = Cursor::new(src, FrontmatterAllowed::Yes);
+    let cursor = Cursor::new(src, frontmatter_allowed);
     let mut lexer = Lexer {
         psess,
         start_pos,
@@ -73,27 +72,23 @@ pub(crate) fn lex_token_trees<'psess, 'src>(
     };
     let res = lexer.lex_token_trees(/* is_delimited */ false);
 
-    let mut unmatched_delims: Vec<_> = lexer
-        .diag_info
-        .unmatched_delims
-        .into_iter()
-        .filter_map(|unmatched_delim| make_unclosed_delims_error(unmatched_delim, psess))
-        .collect();
+    let mut unmatched_closing_delims: Vec<_> =
+        make_errors_for_mismatched_closing_delims(&lexer.diag_info.unmatched_delims, psess);
 
     match res {
         Ok((_open_spacing, stream)) => {
-            if unmatched_delims.is_empty() {
+            if unmatched_closing_delims.is_empty() {
                 Ok(stream)
             } else {
                 // Return error if there are unmatched delimiters or unclosed delimiters.
-                Err(unmatched_delims)
+                Err(unmatched_closing_delims)
             }
         }
         Err(errs) => {
             // We emit delimiter mismatch errors first, then emit the unclosing delimiter mismatch
             // because the delimiter mismatch is more likely to be the root cause of error
-            unmatched_delims.extend(errs);
-            Err(unmatched_delims)
+            unmatched_closing_delims.extend(errs);
+            Err(unmatched_closing_delims)
         }
     }
 }
@@ -548,21 +543,21 @@ impl<'psess, 'src> Lexer<'psess, 'src> {
             })
             .collect();
 
+        let label = label.to_string();
         let count = spans.len();
-        let labels = point_at_inner_spans.then_some(spans.clone());
+        let labels = point_at_inner_spans
+            .then_some(errors::HiddenUnicodeCodepointsDiagLabels { spans: spans.clone() });
+        let sub = if point_at_inner_spans && !spans.is_empty() {
+            errors::HiddenUnicodeCodepointsDiagSub::Escape { spans }
+        } else {
+            errors::HiddenUnicodeCodepointsDiagSub::NoEscape { spans }
+        };
 
         self.psess.buffer_lint(
             TEXT_DIRECTION_CODEPOINT_IN_LITERAL,
             span,
             ast::CRATE_NODE_ID,
-            BuiltinLintDiag::HiddenUnicodeCodepoints {
-                label: label.to_string(),
-                count,
-                span_label: span,
-                labels,
-                escape: point_at_inner_spans && !spans.is_empty(),
-                spans,
-            },
+            errors::HiddenUnicodeCodepointsDiag { label, count, span_label: span, labels, sub },
         );
     }
 
@@ -602,7 +597,7 @@ impl<'psess, 'src> Lexer<'psess, 'src> {
 
         let last_line_start = within.rfind('\n').map_or(0, |i| i + 1);
         let last_line = &within[last_line_start..];
-        let last_line_trimmed = last_line.trim_start_matches(is_whitespace);
+        let last_line_trimmed = last_line.trim_start_matches(is_horizontal_whitespace);
         let last_line_start_pos = frontmatter_opening_end_pos + BytePos(last_line_start as u32);
 
         let frontmatter_span = self.mk_sp(frontmatter_opening_pos, self.pos);
@@ -645,7 +640,7 @@ impl<'psess, 'src> Lexer<'psess, 'src> {
             });
         }
 
-        if !rest.trim_matches(is_whitespace).is_empty() {
+        if !rest.trim_matches(is_horizontal_whitespace).is_empty() {
             let span = self.mk_sp(last_line_start_pos, self.pos);
             self.dcx().emit_err(errors::FrontmatterExtraCharactersAfterClose { span });
         }
@@ -702,7 +697,7 @@ impl<'psess, 'src> Lexer<'psess, 'src> {
                     }
                     err.emit()
                 }
-                self.cook_unicode(token::Char, Mode::Char, start, end, 1, 1) // ' '
+                self.cook_quoted(token::Char, Mode::Char, start, end, 1, 1) // ' '
             }
             rustc_lexer::LiteralKind::Byte { terminated } => {
                 if !terminated {
@@ -714,7 +709,7 @@ impl<'psess, 'src> Lexer<'psess, 'src> {
                         .with_code(E0763)
                         .emit()
                 }
-                self.cook_unicode(token::Byte, Mode::Byte, start, end, 2, 1) // b' '
+                self.cook_quoted(token::Byte, Mode::Byte, start, end, 2, 1) // b' '
             }
             rustc_lexer::LiteralKind::Str { terminated } => {
                 if !terminated {
@@ -726,7 +721,7 @@ impl<'psess, 'src> Lexer<'psess, 'src> {
                         .with_code(E0765)
                         .emit()
                 }
-                self.cook_unicode(token::Str, Mode::Str, start, end, 1, 1) // " "
+                self.cook_quoted(token::Str, Mode::Str, start, end, 1, 1) // " "
             }
             rustc_lexer::LiteralKind::ByteStr { terminated } => {
                 if !terminated {
@@ -738,7 +733,8 @@ impl<'psess, 'src> Lexer<'psess, 'src> {
                         .with_code(E0766)
                         .emit()
                 }
-                self.cook_unicode(token::ByteStr, Mode::ByteStr, start, end, 2, 1) // b" "
+                self.cook_quoted(token::ByteStr, Mode::ByteStr, start, end, 2, 1)
+                // b" "
             }
             rustc_lexer::LiteralKind::CStr { terminated } => {
                 if !terminated {
@@ -750,13 +746,14 @@ impl<'psess, 'src> Lexer<'psess, 'src> {
                         .with_code(E0767)
                         .emit()
                 }
-                self.cook_mixed(token::CStr, Mode::CStr, start, end, 2, 1) // c" "
+                self.cook_quoted(token::CStr, Mode::CStr, start, end, 2, 1) // c" "
             }
             rustc_lexer::LiteralKind::RawStr { n_hashes } => {
                 if let Some(n_hashes) = n_hashes {
                     let n = u32::from(n_hashes);
                     let kind = token::StrRaw(n_hashes);
-                    self.cook_unicode(kind, Mode::RawStr, start, end, 2 + n, 1 + n) // r##" "##
+                    self.cook_quoted(kind, Mode::RawStr, start, end, 2 + n, 1 + n)
+                // r##" "##
                 } else {
                     self.report_raw_str_error(start, 1);
                 }
@@ -765,7 +762,8 @@ impl<'psess, 'src> Lexer<'psess, 'src> {
                 if let Some(n_hashes) = n_hashes {
                     let n = u32::from(n_hashes);
                     let kind = token::ByteStrRaw(n_hashes);
-                    self.cook_unicode(kind, Mode::RawByteStr, start, end, 3 + n, 1 + n) // br##" "##
+                    self.cook_quoted(kind, Mode::RawByteStr, start, end, 3 + n, 1 + n)
+                // br##" "##
                 } else {
                     self.report_raw_str_error(start, 2);
                 }
@@ -774,7 +772,8 @@ impl<'psess, 'src> Lexer<'psess, 'src> {
                 if let Some(n_hashes) = n_hashes {
                     let n = u32::from(n_hashes);
                     let kind = token::CStrRaw(n_hashes);
-                    self.cook_unicode(kind, Mode::RawCStr, start, end, 3 + n, 1 + n) // cr##" "##
+                    self.cook_quoted(kind, Mode::RawCStr, start, end, 3 + n, 1 + n)
+                // cr##" "##
                 } else {
                     self.report_raw_str_error(start, 2);
                 }
@@ -1091,7 +1090,7 @@ impl<'psess, 'src> Lexer<'psess, 'src> {
         self.dcx().emit_fatal(errors::TooManyHashes { span: self.mk_sp(start, self.pos), num });
     }
 
-    fn cook_common(
+    fn cook_quoted(
         &self,
         mut kind: token::LitKind,
         mode: Mode,
@@ -1099,32 +1098,28 @@ impl<'psess, 'src> Lexer<'psess, 'src> {
         end: BytePos,
         prefix_len: u32,
         postfix_len: u32,
-        unescape: fn(&str, Mode, &mut dyn FnMut(Range<usize>, Result<(), EscapeError>)),
     ) -> (token::LitKind, Symbol) {
         let content_start = start + BytePos(prefix_len);
         let content_end = end - BytePos(postfix_len);
         let lit_content = self.str_from_to(content_start, content_end);
-        unescape(lit_content, mode, &mut |range, result| {
-            // Here we only check for errors. The actual unescaping is done later.
-            if let Err(err) = result {
-                let span_with_quotes = self.mk_sp(start, end);
-                let (start, end) = (range.start as u32, range.end as u32);
-                let lo = content_start + BytePos(start);
-                let hi = lo + BytePos(end - start);
-                let span = self.mk_sp(lo, hi);
-                let is_fatal = err.is_fatal();
-                if let Some(guar) = emit_unescape_error(
-                    self.dcx(),
-                    lit_content,
-                    span_with_quotes,
-                    span,
-                    mode,
-                    range,
-                    err,
-                ) {
-                    assert!(is_fatal);
-                    kind = token::Err(guar);
-                }
+        check_for_errors(lit_content, mode, |range, err| {
+            let span_with_quotes = self.mk_sp(start, end);
+            let (start, end) = (range.start as u32, range.end as u32);
+            let lo = content_start + BytePos(start);
+            let hi = lo + BytePos(end - start);
+            let span = self.mk_sp(lo, hi);
+            let is_fatal = err.is_fatal();
+            if let Some(guar) = emit_unescape_error(
+                self.dcx(),
+                lit_content,
+                span_with_quotes,
+                span,
+                mode,
+                range,
+                err,
+            ) {
+                assert!(is_fatal);
+                kind = token::Err(guar);
             }
         });
 
@@ -1136,34 +1131,6 @@ impl<'psess, 'src> Lexer<'psess, 'src> {
             self.symbol_from_to(start, end)
         };
         (kind, sym)
-    }
-
-    fn cook_unicode(
-        &self,
-        kind: token::LitKind,
-        mode: Mode,
-        start: BytePos,
-        end: BytePos,
-        prefix_len: u32,
-        postfix_len: u32,
-    ) -> (token::LitKind, Symbol) {
-        self.cook_common(kind, mode, start, end, prefix_len, postfix_len, |src, mode, callback| {
-            unescape_unicode(src, mode, &mut |span, result| callback(span, result.map(drop)))
-        })
-    }
-
-    fn cook_mixed(
-        &self,
-        kind: token::LitKind,
-        mode: Mode,
-        start: BytePos,
-        end: BytePos,
-        prefix_len: u32,
-        postfix_len: u32,
-    ) -> (token::LitKind, Symbol) {
-        self.cook_common(kind, mode, start, end, prefix_len, postfix_len, |src, mode, callback| {
-            unescape_mixed(src, mode, &mut |span, result| callback(span, result.map(drop)))
-        })
     }
 }
 

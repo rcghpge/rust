@@ -81,6 +81,12 @@ builtin_macros_cfg_accessible_literal_path = `cfg_accessible` path cannot be a l
 builtin_macros_cfg_accessible_multiple_paths = multiple `cfg_accessible` paths are specified
 builtin_macros_cfg_accessible_unspecified_path = `cfg_accessible` path is not specified
 
+builtin_macros_cfg_select_no_matches = none of the predicates in this `cfg_select` evaluated to true
+
+builtin_macros_cfg_select_unreachable = unreachable predicate
+    .label = always matches
+    .label2 = this predicate is never reached
+
 builtin_macros_coerce_pointee_requires_maybe_sized = `derive(CoercePointee)` requires `{$name}` to be marked `?Sized`
 
 builtin_macros_coerce_pointee_requires_one_field = `CoercePointee` can only be derived on `struct`s with at least one field
@@ -104,6 +110,8 @@ builtin_macros_concat_bytes_bad_repeat = repeat count is not a positive number
 builtin_macros_concat_bytes_invalid = cannot concatenate {$lit_kind} literals
     .byte_char = try using a byte character
     .byte_str = try using a byte string
+    .c_str = try using a null-terminated byte string
+    .c_str_note = concatenating C strings is ambiguous about including the '\0'
     .number_array = try wrapping the number in an array
 
 builtin_macros_concat_bytes_missing_literal = expected a byte literal
@@ -116,10 +124,6 @@ builtin_macros_concat_bytes_oob = numeric literal is out of bounds
 builtin_macros_concat_bytestr = cannot concatenate a byte string literal
 builtin_macros_concat_c_str_lit = cannot concatenate a C string literal
 
-builtin_macros_concat_idents_ident_args = `concat_idents!()` requires ident args
-
-builtin_macros_concat_idents_missing_args = `concat_idents!()` takes 1 or more arguments
-builtin_macros_concat_idents_missing_comma = `concat_idents!()` expecting comma
 builtin_macros_concat_missing_literal = expected a literal
     .note = only literals (like `"foo"`, `-42` and `3.14`) can be passed to `concat!()`
 
@@ -218,6 +222,15 @@ builtin_macros_format_unused_args = multiple unused formatting arguments
 
 builtin_macros_format_use_positional = consider using a positional formatting argument instead
 
+builtin_macros_derive_from_wrong_target = `#[derive(From)]` used on {$kind}
+
+builtin_macros_derive_from_wrong_field_count = `#[derive(From)]` used on a struct with {$multiple_fields ->
+    [true] multiple fields
+    *[false] no fields
+}
+
+builtin_macros_derive_from_usage_note = `#[derive(From)]` can only be used on structs with exactly one field
+
 builtin_macros_multiple_default_attrs = multiple `#[default]` attributes
     .note = only one `#[default]` attribute is needed
     .label = `#[default]` used here
@@ -254,8 +267,6 @@ builtin_macros_non_unit_default = the `#[default]` attribute may only be used on
 builtin_macros_only_one_argument = {$name} takes 1 argument
 
 builtin_macros_proc_macro = `proc-macro` crate types currently cannot export any items other than functions tagged with `#[proc_macro]`, `#[proc_macro_derive]`, or `#[proc_macro_attribute]`
-
-builtin_macros_proc_macro_attribute_only_be_used_on_bare_functions = the `#[{$path}]` attribute may only be used on bare functions
 
 builtin_macros_proc_macro_attribute_only_usable_with_crate_type = the `#[{$path}]` attribute is only usable with crates of the `proc-macro` crate type
 

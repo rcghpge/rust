@@ -8,7 +8,6 @@ use std::str;
 use rustc_abi::{HasDataLayout, Size, TargetDataLayout, VariantIdx};
 use rustc_codegen_ssa::back::versioned_llvm_target;
 use rustc_codegen_ssa::base::{wants_msvc_seh, wants_wasm_eh};
-use rustc_codegen_ssa::common::TypeKind;
 use rustc_codegen_ssa::errors as ssa_errors;
 use rustc_codegen_ssa::traits::*;
 use rustc_data_structures::base_n::{ALPHANUMERIC_ONLY, ToBaseN};
@@ -34,7 +33,6 @@ use smallvec::SmallVec;
 
 use crate::back::write::to_llvm_code_model;
 use crate::callee::get_fn;
-use crate::common::AsCCharPtr;
 use crate::debuginfo::metadata::apply_vcall_visibility_metadata;
 use crate::llvm::Metadata;
 use crate::type_::Type;
@@ -169,6 +167,8 @@ pub(crate) unsafe fn create_module<'ll>(
     let mod_name = SmallCStr::new(mod_name);
     let llmod = unsafe { llvm::LLVMModuleCreateWithNameInContext(mod_name.as_ptr(), llcx) };
 
+    let cx = SimpleCx::new(llmod, llcx, tcx.data_layout.pointer_size());
+
     let mut target_data_layout = sess.target.data_layout.to_string();
     let llvm_version = llvm_util::get_version();
 
@@ -206,11 +206,26 @@ pub(crate) unsafe fn create_module<'ll>(
             // LLVM 21 updated the default layout on nvptx: https://github.com/llvm/llvm-project/pull/124961
             target_data_layout = target_data_layout.replace("e-p6:32:32-i64", "e-i64");
         }
+        if sess.target.arch == "amdgpu" {
+            // LLVM 21 adds the address width for address space 8.
+            // See https://github.com/llvm/llvm-project/pull/139419
+            target_data_layout = target_data_layout.replace("p8:128:128:128:48", "p8:128:128")
+        }
+    }
+    if llvm_version < (22, 0, 0) {
+        if sess.target.arch == "avr" {
+            // LLVM 22.0 updated the default layout on avr: https://github.com/llvm/llvm-project/pull/153010
+            target_data_layout = target_data_layout.replace("n8:16", "n8")
+        }
+        if sess.target.arch == "nvptx64" {
+            // LLVM 22 updated the NVPTX layout to indicate 256-bit vector load/store: https://github.com/llvm/llvm-project/pull/155198
+            target_data_layout = target_data_layout.replace("-i256:256", "");
+        }
     }
 
     // Ensure the data-layout values hardcoded remain the defaults.
     {
-        let tm = crate::back::write::create_informational_target_machine(tcx.sess, false);
+        let tm = crate::back::write::create_informational_target_machine(sess, false);
         unsafe {
             llvm::LLVMRustSetDataLayoutFromTargetMachine(llmod, tm.raw());
         }
@@ -366,6 +381,15 @@ pub(crate) unsafe fn create_module<'ll>(
         }
     }
 
+    if let Some(regparm_count) = sess.opts.unstable_opts.regparm {
+        llvm::add_module_flag_u32(
+            llmod,
+            llvm::ModuleFlagMergeBehavior::Error,
+            "NumRegisterParameters",
+            regparm_count,
+        );
+    }
+
     if let Some(BranchProtection { bti, pac_ret }) = sess.opts.unstable_opts.branch_protection {
         if sess.target.arch == "aarch64" {
             llvm::add_module_flag_u32(
@@ -451,6 +475,15 @@ pub(crate) unsafe fn create_module<'ll>(
         }
     }
 
+    if sess.opts.unstable_opts.indirect_branch_cs_prefix {
+        llvm::add_module_flag_u32(
+            llmod,
+            llvm::ModuleFlagMergeBehavior::Override,
+            "indirect_branch_cs_prefix",
+            1,
+        );
+    }
+
     match (sess.opts.unstable_opts.small_data_threshold, sess.target.small_data_threshold_support())
     {
         // Set up the small-data optimization limit for architectures that use
@@ -473,18 +506,14 @@ pub(crate) unsafe fn create_module<'ll>(
     #[allow(clippy::option_env_unwrap)]
     let rustc_producer =
         format!("rustc version {}", option_env!("CFG_VERSION").expect("CFG_VERSION"));
-    let name_metadata = unsafe {
-        llvm::LLVMMDStringInContext2(
-            llcx,
-            rustc_producer.as_c_char_ptr(),
-            rustc_producer.as_bytes().len(),
-        )
-    };
+
+    let name_metadata = cx.create_metadata(rustc_producer.as_bytes());
+
     unsafe {
         llvm::LLVMAddNamedMetadataOperand(
             llmod,
             c"llvm.ident".as_ptr(),
-            &llvm::LLVMMetadataAsValue(llcx, llvm::LLVMMDNodeInContext2(llcx, &name_metadata, 1)),
+            &cx.get_metadata_value(llvm::LLVMMDNodeInContext2(llcx, &name_metadata, 1)),
         );
     }
 
@@ -605,7 +634,7 @@ impl<'ll, 'tcx> CodegenCx<'ll, 'tcx> {
         GenericCx(
             FullCx {
                 tcx,
-                scx: SimpleCx::new(llmod, llcx, tcx.data_layout.pointer_size),
+                scx: SimpleCx::new(llmod, llcx, tcx.data_layout.pointer_size()),
                 use_dll_storage_attrs,
                 tls_model,
                 codegen_unit,
@@ -652,10 +681,6 @@ impl<'ll, 'tcx> CodegenCx<'ll, 'tcx> {
     }
 }
 impl<'ll> SimpleCx<'ll> {
-    pub(crate) fn get_return_type(&self, ty: &'ll Type) -> &'ll Type {
-        assert_eq!(self.type_kind(ty), TypeKind::Function);
-        unsafe { llvm::LLVMGetReturnType(ty) }
-    }
     pub(crate) fn get_type_of_global(&self, val: &'ll Value) -> &'ll Type {
         unsafe { llvm::LLVMGlobalGetValueType(val) }
     }
@@ -680,7 +705,23 @@ impl<'ll, CX: Borrow<SCx<'ll>>> GenericCx<'ll, CX> {
     }
 
     pub(crate) fn get_const_int(&self, ty: &'ll Type, val: u64) -> &'ll Value {
-        unsafe { llvm::LLVMConstInt(ty, val, llvm::False) }
+        unsafe { llvm::LLVMConstInt(ty, val, llvm::FALSE) }
+    }
+
+    pub(crate) fn get_const_i64(&self, n: u64) -> &'ll Value {
+        self.get_const_int(self.type_i64(), n)
+    }
+
+    pub(crate) fn get_const_i32(&self, n: u64) -> &'ll Value {
+        self.get_const_int(self.type_i32(), n)
+    }
+
+    pub(crate) fn get_const_i16(&self, n: u64) -> &'ll Value {
+        self.get_const_int(self.type_i16(), n)
+    }
+
+    pub(crate) fn get_const_i8(&self, n: u64) -> &'ll Value {
+        self.get_const_int(self.type_i8(), n)
     }
 
     pub(crate) fn get_function(&self, name: &str) -> Option<&'ll Value> {
@@ -698,20 +739,10 @@ impl<'ll, CX: Borrow<SCx<'ll>>> GenericCx<'ll, CX> {
         }
     }
 
-    pub(crate) fn create_metadata(&self, name: String) -> Option<&'ll Metadata> {
-        Some(unsafe {
+    pub(crate) fn create_metadata(&self, name: &[u8]) -> &'ll Metadata {
+        unsafe {
             llvm::LLVMMDStringInContext2(self.llcx(), name.as_ptr() as *const c_char, name.len())
-        })
-    }
-
-    pub(crate) fn get_functions(&self) -> Vec<&'ll Value> {
-        let mut functions = vec![];
-        let mut func = unsafe { llvm::LLVMGetFirstFunction(self.llmod()) };
-        while let Some(f) = func {
-            functions.push(f);
-            func = unsafe { llvm::LLVMGetNextFunction(f) }
         }
-        functions
     }
 }
 

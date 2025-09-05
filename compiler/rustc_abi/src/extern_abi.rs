@@ -6,6 +6,8 @@ use std::hash::{Hash, Hasher};
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher, StableOrd};
 #[cfg(feature = "nightly")]
 use rustc_macros::{Decodable, Encodable};
+#[cfg(feature = "nightly")]
+use rustc_span::Symbol;
 
 use crate::AbiFromStrErr;
 
@@ -36,6 +38,10 @@ pub enum ExternAbi {
     /// Stronger than just `#[cold]` because `fn` pointers might be incompatible.
     RustCold,
 
+    /// An always-invalid ABI that's used to test "this ABI is not supported by this platform"
+    /// in a platform-agnostic way.
+    RustInvalid,
+
     /// Unstable impl detail that directly uses Rust types to describe the ABI to LLVM.
     /// Even normally-compatible Rust types can become ABI-incompatible with this ABI!
     Unadjusted,
@@ -55,9 +61,9 @@ pub enum ExternAbi {
         unwind: bool,
     },
     /// extremely constrained barely-C ABI for TrustZone
-    CCmseNonSecureCall,
+    CmseNonSecureCall,
     /// extremely constrained barely-C ABI for TrustZone
-    CCmseNonSecureEntry,
+    CmseNonSecureEntry,
 
     /* gpu */
     /// An entry-point function called by the GPU's host
@@ -136,8 +142,6 @@ macro_rules! abi_impls {
 abi_impls! {
     ExternAbi = {
             C { unwind: false } =><= "C",
-            CCmseNonSecureCall =><= "C-cmse-nonsecure-call",
-            CCmseNonSecureEntry =><= "C-cmse-nonsecure-entry",
             C { unwind: true } =><= "C-unwind",
             Rust =><= "Rust",
             Aapcs { unwind: false } =><= "aapcs",
@@ -146,6 +150,8 @@ abi_impls! {
             AvrNonBlockingInterrupt =><= "avr-non-blocking-interrupt",
             Cdecl { unwind: false } =><= "cdecl",
             Cdecl { unwind: true } =><= "cdecl-unwind",
+            CmseNonSecureCall =><= "cmse-nonsecure-call",
+            CmseNonSecureEntry =><= "cmse-nonsecure-entry",
             Custom =><= "custom",
             EfiApi =><= "efiapi",
             Fastcall { unwind: false } =><= "fastcall",
@@ -157,6 +163,7 @@ abi_impls! {
             RiscvInterruptS =><= "riscv-interrupt-s",
             RustCall =><= "rust-call",
             RustCold =><= "rust-cold",
+            RustInvalid =><= "rust-invalid",
             Stdcall { unwind: false } =><= "stdcall",
             Stdcall { unwind: true } =><= "stdcall-unwind",
             System { unwind: false } =><= "system",
@@ -218,6 +225,16 @@ impl StableOrd for ExternAbi {
     const THIS_IMPLEMENTATION_HAS_BEEN_TRIPLE_CHECKED: () = ();
 }
 
+#[cfg(feature = "nightly")]
+rustc_error_messages::into_diag_arg_using_display!(ExternAbi);
+
+#[cfg(feature = "nightly")]
+pub enum CVariadicStatus {
+    NotSupported,
+    Stable,
+    Unstable { feature: Symbol },
+}
+
 impl ExternAbi {
     /// An ABI "like Rust"
     ///
@@ -230,23 +247,33 @@ impl ExternAbi {
         matches!(self, Rust | RustCall | RustCold)
     }
 
-    pub fn supports_varargs(self) -> bool {
+    /// Returns whether the ABI supports C variadics. This only controls whether we allow *imports*
+    /// of such functions via `extern` blocks; there's a separate check during AST construction
+    /// guarding *definitions* of variadic functions.
+    #[cfg(feature = "nightly")]
+    pub fn supports_c_variadic(self) -> CVariadicStatus {
         // * C and Cdecl obviously support varargs.
         // * C can be based on Aapcs, SysV64 or Win64, so they must support varargs.
         // * EfiApi is based on Win64 or C, so it also supports it.
+        // * System automatically falls back to C when used with variadics, therefore supports it.
         //
         // * Stdcall does not, because it would be impossible for the callee to clean
         //   up the arguments. (callee doesn't know how many arguments are there)
         // * Same for Fastcall, Vectorcall and Thiscall.
         // * Other calling conventions are related to hardware or the compiler itself.
+        //
+        // All of the supported ones must have a test in `tests/codegen/cffi/c-variadic-ffi.rs`.
         match self {
             Self::C { .. }
             | Self::Cdecl { .. }
             | Self::Aapcs { .. }
             | Self::Win64 { .. }
             | Self::SysV64 { .. }
-            | Self::EfiApi => true,
-            _ => false,
+            | Self::EfiApi => CVariadicStatus::Stable,
+            Self::System { .. } => {
+                CVariadicStatus::Unstable { feature: rustc_span::sym::extern_system_varargs }
+            }
+            _ => CVariadicStatus::NotSupported,
         }
     }
 }

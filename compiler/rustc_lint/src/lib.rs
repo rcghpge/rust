@@ -55,7 +55,7 @@ mod invalid_from_utf8;
 mod late;
 mod let_underscore;
 mod levels;
-mod lifetime_syntax;
+pub mod lifetime_syntax;
 mod lints;
 mod macro_expr_fragment_specifier_2024_migration;
 mod map_unit_fn;
@@ -133,10 +133,9 @@ pub use early::{EarlyCheckNode, check_ast_node};
 pub use late::{check_crate, late_lint_mod, unerased_lint_store};
 pub use levels::LintLevelsBuilder;
 pub use passes::{EarlyLintPass, LateLintPass};
+pub use rustc_errors::BufferedEarlyLint;
 pub use rustc_session::lint::Level::{self, *};
-pub use rustc_session::lint::{
-    BufferedEarlyLint, FutureIncompatibleInfo, Lint, LintId, LintPass, LintVec,
-};
+pub use rustc_session::lint::{FutureIncompatibleInfo, Lint, LintId, LintPass, LintVec};
 
 rustc_fluent_macro::fluent_messages! { "../messages.ftl" }
 
@@ -338,6 +337,14 @@ fn register_builtins(store: &mut LintStore) {
     );
 
     add_lint_group!("deprecated_safe", DEPRECATED_SAFE_2024);
+
+    add_lint_group!(
+        "unknown_or_malformed_diagnostic_attributes",
+        MALFORMED_DIAGNOSTIC_ATTRIBUTES,
+        MALFORMED_DIAGNOSTIC_FORMAT_LITERALS,
+        MISPLACED_DIAGNOSTIC_ATTRIBUTES,
+        UNKNOWN_DIAGNOSTIC_ATTRIBUTES
+    );
 
     // Register renamed and removed lints.
     store.register_renamed("single_use_lifetime", "single_use_lifetimes");
@@ -608,6 +615,7 @@ fn register_builtins(store: &mut LintStore) {
         "converted into hard error, see issue #127323 \
          <https://github.com/rust-lang/rust/issues/127323> for more information",
     );
+    store.register_removed("unsupported_fn_ptr_calling_conventions", "converted into hard error");
     store.register_removed(
         "undefined_naked_function_abi",
         "converted into hard error, see PR #139001 \
@@ -668,6 +676,7 @@ fn register_internals(store: &mut LintStore) {
             LintId::of(USAGE_OF_TYPE_IR_TRAITS),
             LintId::of(BAD_OPT_ACCESS),
             LintId::of(SPAN_USE_EQ_CTXT),
+            LintId::of(DIRECT_USE_OF_RUSTC_TYPE_IR),
         ],
     );
 }

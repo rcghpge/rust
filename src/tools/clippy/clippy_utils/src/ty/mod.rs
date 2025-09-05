@@ -8,20 +8,22 @@ use rustc_abi::VariantIdx;
 use rustc_ast::ast::Mutability;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_hir as hir;
+use rustc_hir::attrs::AttributeKind;
 use rustc_hir::def::{CtorKind, CtorOf, DefKind, Res};
 use rustc_hir::def_id::DefId;
-use rustc_hir::{Expr, FnDecl, LangItem, TyKind};
+use rustc_hir::{Expr, FnDecl, LangItem, TyKind, find_attr};
 use rustc_hir_analysis::lower_ty;
 use rustc_infer::infer::TyCtxtInferExt;
 use rustc_lint::LateContext;
 use rustc_middle::mir::ConstValue;
 use rustc_middle::mir::interpret::Scalar;
 use rustc_middle::traits::EvaluationResult;
+use rustc_middle::ty::adjustment::{Adjust, Adjustment};
 use rustc_middle::ty::layout::ValidityRequirement;
 use rustc_middle::ty::{
     self, AdtDef, AliasTy, AssocItem, AssocTag, Binder, BoundRegion, FnSig, GenericArg, GenericArgKind, GenericArgsRef,
-    GenericParamDefKind, IntTy, Region, RegionKind, TraitRef, Ty, TyCtxt, TypeSuperVisitable,
-    TypeVisitable, TypeVisitableExt, TypeVisitor, UintTy, Upcast, VariantDef, VariantDiscr,
+    GenericParamDefKind, IntTy, Region, RegionKind, TraitRef, Ty, TyCtxt, TypeSuperVisitable, TypeVisitable,
+    TypeVisitableExt, TypeVisitor, UintTy, Upcast, VariantDef, VariantDiscr,
 };
 use rustc_span::symbol::Ident;
 use rustc_span::{DUMMY_SP, Span, Symbol, sym};
@@ -30,7 +32,7 @@ use rustc_trait_selection::traits::query::normalize::QueryNormalizeExt;
 use rustc_trait_selection::traits::{Obligation, ObligationCause};
 use std::assert_matches::debug_assert_matches;
 use std::collections::hash_map::Entry;
-use std::iter;
+use std::{iter, mem};
 
 use crate::path_res;
 use crate::paths::{PathNS, lookup_path_str};
@@ -326,8 +328,8 @@ pub fn has_drop<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
 // Returns whether the type has #[must_use] attribute
 pub fn is_must_use_ty<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
     match ty.kind() {
-        ty::Adt(adt, _) => cx.tcx.has_attr(adt.did(), sym::must_use),
-        ty::Foreign(did) => cx.tcx.has_attr(*did, sym::must_use),
+        ty::Adt(adt, _) => find_attr!(cx.tcx.get_all_attrs(adt.did()), AttributeKind::MustUse { .. }),
+        ty::Foreign(did) => find_attr!(cx.tcx.get_all_attrs(*did), AttributeKind::MustUse { .. }),
         ty::Slice(ty) | ty::Array(ty, _) | ty::RawPtr(ty, _) | ty::Ref(_, ty, _) => {
             // for the Array case we don't need to care for the len == 0 case
             // because we don't want to lint functions returning empty arrays
@@ -337,7 +339,10 @@ pub fn is_must_use_ty<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
         ty::Alias(ty::Opaque, AliasTy { def_id, .. }) => {
             for (predicate, _) in cx.tcx.explicit_item_self_bounds(def_id).skip_binder() {
                 if let ty::ClauseKind::Trait(trait_predicate) = predicate.kind().skip_binder()
-                    && cx.tcx.has_attr(trait_predicate.trait_ref.def_id, sym::must_use)
+                    && find_attr!(
+                        cx.tcx.get_all_attrs(trait_predicate.trait_ref.def_id),
+                        AttributeKind::MustUse { .. }
+                    )
                 {
                     return true;
                 }
@@ -347,7 +352,7 @@ pub fn is_must_use_ty<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
         ty::Dynamic(binder, _, _) => {
             for predicate in *binder {
                 if let ty::ExistentialPredicate::Trait(ref trait_ref) = predicate.skip_binder()
-                    && cx.tcx.has_attr(trait_ref.def_id, sym::must_use)
+                    && find_attr!(cx.tcx.get_all_attrs(trait_ref.def_id), AttributeKind::MustUse { .. })
                 {
                     return true;
                 }
@@ -488,10 +493,7 @@ pub fn peel_mid_ty_refs_is_mutable(ty: Ty<'_>) -> (Ty<'_>, usize, Mutability) {
 
 /// Returns `true` if the given type is an `unsafe` function.
 pub fn type_is_unsafe_function<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
-    match ty.kind() {
-        ty::FnDef(..) | ty::FnPtr(..) => ty.fn_sig(cx.tcx).safety().is_unsafe(),
-        _ => false,
-    }
+    ty.is_fn() && ty.fn_sig(cx.tcx).safety().is_unsafe()
 }
 
 /// Returns the base type for HIR references and pointers.
@@ -581,7 +583,7 @@ pub fn all_predicates_of(tcx: TyCtxt<'_>, id: DefId) -> impl Iterator<Item = &(t
 }
 
 /// A signature for a function like type.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum ExprFnSig<'tcx> {
     Sig(Binder<'tcx, FnSig<'tcx>>, Option<DefId>),
     Closure(Option<&'tcx FnDecl<'tcx>>, Binder<'tcx, FnSig<'tcx>>),
@@ -885,7 +887,7 @@ impl AdtVariantInfo {
                     .enumerate()
                     .map(|(i, f)| (i, approx_ty_size(cx, f.ty(cx.tcx, subst))))
                     .collect::<Vec<_>>();
-                fields_size.sort_by(|(_, a_size), (_, b_size)| (a_size.cmp(b_size)));
+                fields_size.sort_by(|(_, a_size), (_, b_size)| a_size.cmp(b_size));
 
                 Self {
                     ind: i,
@@ -894,7 +896,7 @@ impl AdtVariantInfo {
                 }
             })
             .collect::<Vec<_>>();
-        variants_size.sort_by(|a, b| (b.size.cmp(&a.size)));
+        variants_size.sort_by(|a, b| b.size.cmp(&a.size));
         variants_size
     }
 }
@@ -1381,7 +1383,6 @@ pub fn is_slice_like<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
         || matches!(ty.kind(), ty::Adt(adt_def, _) if cx.tcx.is_diagnostic_item(sym::Vec, adt_def.did()))
 }
 
-/// Gets the index of a field by name.
 pub fn get_field_idx_by_name(ty: Ty<'_>, name: Symbol) -> Option<usize> {
     match *ty.kind() {
         ty::Adt(def, _) if def.is_union() || def.is_struct() => {
@@ -1390,4 +1391,12 @@ pub fn get_field_idx_by_name(ty: Ty<'_>, name: Symbol) -> Option<usize> {
         ty::Tuple(_) => name.as_str().parse::<usize>().ok(),
         _ => None,
     }
+}
+
+/// Checks if the adjustments contain a mutable dereference of a `ManuallyDrop<_>`.
+pub fn adjust_derefs_manually_drop<'tcx>(adjustments: &'tcx [Adjustment<'tcx>], mut ty: Ty<'tcx>) -> bool {
+    adjustments.iter().any(|a| {
+        let ty = mem::replace(&mut ty, a.target);
+        matches!(a.kind, Adjust::Deref(Some(op)) if op.mutbl == Mutability::Mut) && is_manually_drop(ty)
+    })
 }

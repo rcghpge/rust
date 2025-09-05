@@ -166,6 +166,10 @@ impl Handle {
     /// Structurally invalid handles return [`HandleError::InvalidHandle`].
     /// If the handle is structurally valid but semantically invalid, e.g. a for non-existent thread
     /// ID, returns [`HandleError::ThreadNotFound`].
+    ///
+    /// This function is deliberately private; shims should always use `read_handle`.
+    /// That enforces handle validity even when Windows does not: for now, we argue invalid
+    /// handles are always a bug and programmers likely want to know about them.
     fn try_from_scalar<'tcx>(
         handle: Scalar,
         cx: &MiriInterpCx<'tcx>,
@@ -285,9 +289,11 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         }
 
         if this.ptr_is_null(target_handle_ptr)? {
-            throw_unsup_format!(
-                "`DuplicateHandle` `lpTargetHandle` parameter is null, which is unsupported"
-            );
+            throw_machine_stop!(TerminationInfo::Abort(
+                "`DuplicateHandle` `lpTargetHandle` parameter must not be null, as otherwise the \
+                newly created handle is leaked"
+                    .to_string()
+            ));
         }
 
         if options != this.eval_windows("c", "DUPLICATE_SAME_ACCESS") {

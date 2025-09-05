@@ -3,7 +3,6 @@
 use std::ffi::{CStr, CString};
 use std::num::NonZero;
 use std::ptr;
-use std::str::FromStr;
 use std::string::FromUtf8Error;
 
 use libc::c_uint;
@@ -16,7 +15,6 @@ pub(crate) use self::MetadataType::*;
 pub(crate) use self::ffi::*;
 use crate::common::AsCCharPtr;
 
-pub(crate) mod archive_ro;
 pub(crate) mod diagnostic;
 pub(crate) mod enzyme_ffi;
 mod ffi;
@@ -39,32 +37,6 @@ pub(crate) fn AddFunctionAttributes<'ll>(
 ) {
     unsafe {
         LLVMRustAddFunctionAttributes(llfn, idx.as_uint(), attrs.as_ptr(), attrs.len());
-    }
-}
-
-pub(crate) fn HasAttributeAtIndex<'ll>(
-    llfn: &'ll Value,
-    idx: AttributePlace,
-    kind: AttributeKind,
-) -> bool {
-    unsafe { LLVMRustHasAttributeAtIndex(llfn, idx.as_uint(), kind) }
-}
-
-pub(crate) fn HasStringAttribute<'ll>(llfn: &'ll Value, name: &str) -> bool {
-    unsafe { LLVMRustHasFnAttribute(llfn, name.as_c_char_ptr(), name.len()) }
-}
-
-pub(crate) fn RemoveStringAttrFromFn<'ll>(llfn: &'ll Value, name: &str) {
-    unsafe { LLVMRustRemoveFnAttribute(llfn, name.as_c_char_ptr(), name.len()) }
-}
-
-pub(crate) fn RemoveRustEnumAttributeAtIndex(
-    llfn: &Value,
-    place: AttributePlace,
-    kind: AttributeKind,
-) {
-    unsafe {
-        LLVMRustRemoveEnumAttributeAtIndex(llfn, place.as_uint(), kind);
     }
 }
 
@@ -140,16 +112,26 @@ pub(crate) fn CreateAllocKindAttr(llcx: &Context, kind_arg: AllocKindFlags) -> &
 
 pub(crate) fn CreateRangeAttr(llcx: &Context, size: Size, range: WrappingRange) -> &Attribute {
     let lower = range.start;
+    // LLVM treats the upper bound as exclusive, but allows wrapping.
     let upper = range.end.wrapping_add(1);
-    let lower_words = [lower as u64, (lower >> 64) as u64];
-    let upper_words = [upper as u64, (upper >> 64) as u64];
+
+    // Pass each `u128` endpoint value as a `[u64; 2]` array, least-significant part first.
+    let as_u64_array = |x: u128| [x as u64, (x >> 64) as u64];
+    let lower_words: [u64; 2] = as_u64_array(lower);
+    let upper_words: [u64; 2] = as_u64_array(upper);
+
+    // To ensure that LLVM doesn't try to read beyond the `[u64; 2]` arrays,
+    // we must explicitly check that `size_bits` does not exceed 128.
+    let size_bits = size.bits();
+    assert!(size_bits <= 128);
+    // More robust assertions that are redundant with `size_bits <= 128` and
+    // should be optimized away.
+    assert!(size_bits.div_ceil(64) <= u64::try_from(lower_words.len()).unwrap());
+    assert!(size_bits.div_ceil(64) <= u64::try_from(upper_words.len()).unwrap());
+    let size_bits = c_uint::try_from(size_bits).unwrap();
+
     unsafe {
-        LLVMRustCreateRangeAttribute(
-            llcx,
-            size.bits().try_into().unwrap(),
-            lower_words.as_ptr(),
-            upper_words.as_ptr(),
-        )
+        LLVMRustCreateRangeAttribute(llcx, size_bits, lower_words.as_ptr(), upper_words.as_ptr())
     }
 }
 
@@ -178,21 +160,6 @@ pub(crate) enum CodeGenOptSize {
     CodeGenOptSizeAggressive = 2,
 }
 
-impl FromStr for ArchiveKind {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "gnu" => Ok(ArchiveKind::K_GNU),
-            "bsd" => Ok(ArchiveKind::K_BSD),
-            "darwin" => Ok(ArchiveKind::K_DARWIN),
-            "coff" => Ok(ArchiveKind::K_COFF),
-            "aix_big" => Ok(ArchiveKind::K_AIXBIG),
-            _ => Err(()),
-        }
-    }
-}
-
 pub(crate) fn SetInstructionCallConv(instr: &Value, cc: CallConv) {
     unsafe {
         LLVMSetInstructionCallConv(instr, cc as c_uint);
@@ -211,16 +178,14 @@ pub(crate) fn SetFunctionCallConv(fn_: &Value, cc: CallConv) {
 // function.
 // For more details on COMDAT sections see e.g., https://www.airs.com/blog/archives/52
 pub(crate) fn SetUniqueComdat(llmod: &Module, val: &Value) {
-    let name_buf = get_value_name(val).to_vec();
+    let name_buf = get_value_name(val);
     let name =
         CString::from_vec_with_nul(name_buf).or_else(|buf| CString::new(buf.into_bytes())).unwrap();
     set_comdat(llmod, val, &name);
 }
 
-pub(crate) fn SetUnnamedAddress(global: &Value, unnamed: UnnamedAddr) {
-    unsafe {
-        LLVMSetUnnamedAddress(global, unnamed);
-    }
+pub(crate) fn set_unnamed_address(global: &Value, unnamed: UnnamedAddr) {
+    LLVMSetUnnamedAddress(global, unnamed);
 }
 
 pub(crate) fn set_thread_local_mode(global: &Value, mode: ThreadLocalMode) {
@@ -260,9 +225,7 @@ pub(crate) fn set_initializer(llglobal: &Value, constant_val: &Value) {
 }
 
 pub(crate) fn set_global_constant(llglobal: &Value, is_constant: bool) {
-    unsafe {
-        LLVMSetGlobalConstant(llglobal, if is_constant { ffi::True } else { ffi::False });
-    }
+    LLVMSetGlobalConstant(llglobal, is_constant.to_llvm_bool());
 }
 
 pub(crate) fn get_linkage(llglobal: &Value) -> Linkage {
@@ -276,7 +239,7 @@ pub(crate) fn set_linkage(llglobal: &Value, linkage: Linkage) {
 }
 
 pub(crate) fn is_declaration(llglobal: &Value) -> bool {
-    unsafe { LLVMIsDeclaration(llglobal) == ffi::True }
+    unsafe { LLVMIsDeclaration(llglobal) }.is_true()
 }
 
 pub(crate) fn get_visibility(llglobal: &Value) -> Visibility {
@@ -319,12 +282,14 @@ pub(crate) fn get_param(llfn: &Value, index: c_uint) -> &Value {
     }
 }
 
-/// Safe wrapper for `LLVMGetValueName2` into a byte slice
-pub(crate) fn get_value_name(value: &Value) -> &[u8] {
+/// Safe wrapper for `LLVMGetValueName2`
+/// Needs to allocate the value, because `set_value_name` will invalidate
+/// the pointer.
+pub(crate) fn get_value_name(value: &Value) -> Vec<u8> {
     unsafe {
         let mut len = 0;
         let data = LLVMGetValueName2(value, &mut len);
-        std::slice::from_raw_parts(data.cast(), len)
+        std::slice::from_raw_parts(data.cast(), len).to_vec()
     }
 }
 

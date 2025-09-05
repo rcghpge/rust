@@ -5,12 +5,13 @@ use rustc_abi::{self as abi, Align, HasDataLayout, Primitive, Size, WrappingRang
 use rustc_codegen_ssa::traits::{
     BaseTypeCodegenMethods, ConstCodegenMethods, StaticCodegenMethods,
 };
+use rustc_hir::attrs::Linkage;
 use rustc_hir::def::DefKind;
+use rustc_hir::def_id::LOCAL_CRATE;
 use rustc_middle::middle::codegen_fn_attrs::{CodegenFnAttrFlags, CodegenFnAttrs};
 use rustc_middle::mir::interpret::{
     self, ConstAllocation, ErrorHandled, Scalar as InterpScalar, read_target_uint,
 };
-use rustc_middle::mir::mono::Linkage;
 use rustc_middle::ty::layout::LayoutOf;
 use rustc_middle::ty::{self, Instance};
 use rustc_middle::{bug, span_bug};
@@ -36,18 +37,14 @@ fn set_global_alignment<'gcc, 'tcx>(
 
 impl<'gcc, 'tcx> StaticCodegenMethods for CodegenCx<'gcc, 'tcx> {
     fn static_addr_of(&self, cv: RValue<'gcc>, align: Align, kind: Option<&str>) -> RValue<'gcc> {
-        // TODO(antoyo): implement a proper rvalue comparison in libgccjit instead of doing the
-        // following:
-        for (value, variable) in &*self.const_globals.borrow() {
-            if format!("{:?}", value) == format!("{:?}", cv) {
-                if let Some(global_variable) = self.global_lvalues.borrow().get(variable) {
-                    let alignment = align.bits() as i32;
-                    if alignment > global_variable.get_alignment() {
-                        global_variable.set_alignment(alignment);
-                    }
+        if let Some(variable) = self.const_globals.borrow().get(&cv) {
+            if let Some(global_variable) = self.global_lvalues.borrow().get(variable) {
+                let alignment = align.bits() as i32;
+                if alignment > global_variable.get_alignment() {
+                    global_variable.set_alignment(alignment);
                 }
-                return *variable;
             }
+            return *variable;
         }
         let global_value = self.static_addr_of_mut(cv, align, kind);
         #[cfg(feature = "master")]
@@ -288,15 +285,17 @@ impl<'gcc, 'tcx> CodegenCx<'gcc, 'tcx> {
         global
     }
 }
-
-pub fn const_alloc_to_gcc<'gcc>(
+/// Converts a given const alloc to a gcc Rvalue, without any caching or deduplication.
+/// YOU SHOULD NOT call this function directly - that may break the semantics of Rust.
+/// Use `const_data_from_alloc` instead.
+pub(crate) fn const_alloc_to_gcc_uncached<'gcc>(
     cx: &CodegenCx<'gcc, '_>,
     alloc: ConstAllocation<'_>,
 ) -> RValue<'gcc> {
     let alloc = alloc.inner();
     let mut llvals = Vec::with_capacity(alloc.provenance().ptrs().len() + 1);
     let dl = cx.data_layout();
-    let pointer_size = dl.pointer_size.bytes() as usize;
+    let pointer_size = dl.pointer_size().bytes() as usize;
 
     let mut next_offset = 0;
     for &(offset, prov) in alloc.provenance().ptrs().iter() {
@@ -321,7 +320,7 @@ pub fn const_alloc_to_gcc<'gcc>(
             // and we properly interpret the provenance as a relocation pointer offset.
             alloc.inspect_with_uninit_and_ptr_outside_interpreter(offset..(offset + pointer_size)),
         )
-        .expect("const_alloc_to_llvm: could not read relocation pointer")
+        .expect("const_alloc_to_gcc_uncached: could not read relocation pointer")
             as u64;
 
         let address_space = cx.tcx.global_alloc(alloc_id).address_space(cx);
@@ -333,7 +332,7 @@ pub fn const_alloc_to_gcc<'gcc>(
             ),
             abi::Scalar::Initialized {
                 value: Primitive::Pointer(address_space),
-                valid_range: WrappingRange::full(dl.pointer_size),
+                valid_range: WrappingRange::full(dl.pointer_size()),
             },
             cx.type_i8p_ext(address_space),
         ));
@@ -360,7 +359,7 @@ fn codegen_static_initializer<'gcc, 'tcx>(
     def_id: DefId,
 ) -> Result<(RValue<'gcc>, ConstAllocation<'tcx>), ErrorHandled> {
     let alloc = cx.tcx.eval_static_initializer(def_id)?;
-    Ok((const_alloc_to_gcc(cx, alloc), alloc))
+    Ok((cx.const_data_from_alloc(alloc), alloc))
 }
 
 fn check_and_apply_linkage<'gcc, 'tcx>(
@@ -386,8 +385,8 @@ fn check_and_apply_linkage<'gcc, 'tcx>(
         // linkage and there are no definitions), then
         // `extern_with_linkage_foo` will instead be initialized to
         // zero.
-        let mut real_name = "_rust_extern_with_linkage_".to_string();
-        real_name.push_str(sym);
+        let real_name =
+            format!("_rust_extern_with_linkage_{:016x}_{sym}", cx.tcx.stable_crate_id(LOCAL_CRATE));
         let global2 = cx.define_global(&real_name, gcc_type, is_tls, attrs.link_section);
         // TODO(antoyo): set linkage.
         let value = cx.const_ptrcast(global1.get_address(None), gcc_type);

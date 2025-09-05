@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 
+use rustc_abi::ExternAbi;
 use rustc_ast::Label;
 use rustc_errors::codes::*;
 use rustc_errors::{
@@ -29,8 +30,6 @@ pub(crate) struct BaseExpressionDoubleDot {
         style = "verbose"
     )]
     pub default_field_values_suggestion: Option<Span>,
-    #[subdiagnostic]
-    pub default_field_values_help: Option<BaseExpressionDoubleDotEnableDefaultFieldValues>,
     #[subdiagnostic]
     pub add_expr: Option<BaseExpressionDoubleDotAddExpr>,
     #[subdiagnostic]
@@ -60,10 +59,6 @@ pub(crate) struct BaseExpressionDoubleDotAddExpr {
     #[primary_span]
     pub span: Span,
 }
-
-#[derive(Subdiagnostic)]
-#[help(hir_typeck_base_expression_double_dot_enable_default_field_values)]
-pub(crate) struct BaseExpressionDoubleDotEnableDefaultFieldValues;
 
 #[derive(Diagnostic)]
 #[diag(hir_typeck_field_multiply_specified_in_initializer, code = E0062)]
@@ -205,11 +200,11 @@ pub(crate) enum ExplicitDestructorCallSugg {
 
 #[derive(Diagnostic)]
 #[diag(hir_typeck_missing_parentheses_in_range, code = E0689)]
-pub(crate) struct MissingParenthesesInRange {
+pub(crate) struct MissingParenthesesInRange<'tcx> {
     #[primary_span]
     #[label(hir_typeck_missing_parentheses_in_range)]
     pub span: Span,
-    pub ty_str: String,
+    pub ty: Ty<'tcx>,
     pub method_name: String,
     #[subdiagnostic]
     pub add_missing_parentheses: Option<AddMissingParenthesesInRange>,
@@ -611,24 +606,6 @@ impl Subdiagnostic for RemoveSemiForCoerce {
 }
 
 #[derive(Diagnostic)]
-#[diag(hir_typeck_const_select_must_be_const)]
-#[help]
-pub(crate) struct ConstSelectMustBeConst {
-    #[primary_span]
-    pub span: Span,
-}
-
-#[derive(Diagnostic)]
-#[diag(hir_typeck_const_select_must_be_fn)]
-#[note]
-#[help]
-pub(crate) struct ConstSelectMustBeFn<'a> {
-    #[primary_span]
-    pub span: Span,
-    pub ty: Ty<'a>,
-}
-
-#[derive(Diagnostic)]
 #[diag(hir_typeck_union_pat_multiple_fields)]
 pub(crate) struct UnionPatMultipleFields {
     #[primary_span]
@@ -851,13 +828,13 @@ pub(crate) struct UnlabeledCfInWhileCondition<'a> {
 
 #[derive(Diagnostic)]
 #[diag(hir_typeck_no_associated_item, code = E0599)]
-pub(crate) struct NoAssociatedItem {
+pub(crate) struct NoAssociatedItem<'tcx> {
     #[primary_span]
     pub span: Span,
     pub item_kind: &'static str,
     pub item_ident: Ident,
     pub ty_prefix: Cow<'static, str>,
-    pub ty_str: String,
+    pub ty: Ty<'tcx>,
     pub trait_missing_method: bool,
 }
 
@@ -1165,8 +1142,17 @@ pub(crate) struct NakedFunctionsMustNakedAsm {
 }
 
 #[derive(Diagnostic)]
-#[diag(hir_typeck_abi_custom_call)]
-pub(crate) struct AbiCustomCall {
+#[diag(hir_typeck_abi_cannot_be_called)]
+pub(crate) struct AbiCannotBeCalled {
+    #[primary_span]
+    #[note]
+    pub span: Span,
+    pub abi: ExternAbi,
+}
+
+#[derive(Diagnostic)]
+#[diag(hir_typeck_const_continue_bad_label)]
+pub(crate) struct ConstContinueBadLabel {
     #[primary_span]
     pub span: Span,
 }

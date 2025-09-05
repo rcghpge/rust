@@ -21,22 +21,22 @@ use std::ops::{Deref, DerefMut};
 use std::str::FromStr;
 
 use itertools::{Either, Itertools};
-use rustc_abi::ExternAbi;
-use rustc_ast::ptr::P;
+use rustc_abi::{CanonAbi, ExternAbi, InterruptKind};
 use rustc_ast::visit::{AssocCtxt, BoundKind, FnCtxt, FnKind, Visitor, walk_list};
 use rustc_ast::*;
 use rustc_ast_pretty::pprust::{self, State};
+use rustc_attr_parsing::validate_attr;
 use rustc_data_structures::fx::FxIndexMap;
-use rustc_errors::DiagCtxtHandle;
+use rustc_errors::{DiagCtxtHandle, LintBuffer};
 use rustc_feature::Features;
-use rustc_parse::validate_attr;
 use rustc_session::Session;
+use rustc_session::lint::BuiltinLintDiag;
 use rustc_session::lint::builtin::{
     DEPRECATED_WHERE_CLAUSE_LOCATION, MISSING_ABI, MISSING_UNSAFE_ON_EXTERN,
     PATTERNS_IN_FNS_WITHOUT_BODY,
 };
-use rustc_session::lint::{BuiltinLintDiag, LintBuffer};
 use rustc_span::{Ident, Span, kw, sym};
+use rustc_target::spec::{AbiMap, AbiMapping};
 use thin_vec::thin_vec;
 
 use crate::errors::{self, TildeConstReason};
@@ -48,14 +48,14 @@ enum SelfSemantic {
 }
 
 enum TraitOrTraitImpl {
-    Trait { span: Span, constness_span: Option<Span> },
+    Trait { span: Span, constness: Const },
     TraitImpl { constness: Const, polarity: ImplPolarity, trait_ref_span: Span },
 }
 
 impl TraitOrTraitImpl {
     fn constness(&self) -> Option<Span> {
         match self {
-            Self::Trait { constness_span: Some(span), .. }
+            Self::Trait { constness: Const::Yes(span), .. }
             | Self::TraitImpl { constness: Const::Yes(span), .. } => Some(*span),
             _ => None,
         }
@@ -109,15 +109,10 @@ impl<'a> AstValidator<'a> {
         self.outer_trait_or_trait_impl = old;
     }
 
-    fn with_in_trait(
-        &mut self,
-        span: Span,
-        constness_span: Option<Span>,
-        f: impl FnOnce(&mut Self),
-    ) {
+    fn with_in_trait(&mut self, span: Span, constness: Const, f: impl FnOnce(&mut Self)) {
         let old = mem::replace(
             &mut self.outer_trait_or_trait_impl,
-            Some(TraitOrTraitImpl::Trait { span, constness_span }),
+            Some(TraitOrTraitImpl::Trait { span, constness }),
         );
         f(self);
         self.outer_trait_or_trait_impl = old;
@@ -272,7 +267,7 @@ impl<'a> AstValidator<'a> {
         };
 
         let make_trait_const_sugg = if const_trait_impl
-            && let TraitOrTraitImpl::Trait { span, constness_span: None } = parent
+            && let TraitOrTraitImpl::Trait { span, constness: ast::Const::No } = parent
         {
             Some(span.shrink_to_lo())
         } else {
@@ -295,6 +290,21 @@ impl<'a> AstValidator<'a> {
                 || make_trait_const_sugg.is_some(),
             make_impl_const_sugg,
             make_trait_const_sugg,
+        });
+    }
+
+    fn check_async_fn_in_const_trait_or_impl(&self, sig: &FnSig, parent: &TraitOrTraitImpl) {
+        let Some(const_keyword) = parent.constness() else { return };
+
+        let Some(CoroutineKind::Async { span: async_keyword, .. }) = sig.header.coroutine_kind
+        else {
+            return;
+        };
+
+        self.dcx().emit_err(errors::AsyncFnInConstTraitOrTraitImpl {
+            async_keyword,
+            in_impl: matches!(parent, TraitOrTraitImpl::TraitImpl { .. }),
+            const_keyword,
         });
     }
 
@@ -365,31 +375,94 @@ impl<'a> AstValidator<'a> {
         }
     }
 
-    /// An `extern "custom"` function must be unsafe, and must not have any parameters or return
-    /// type.
-    fn check_custom_abi(&self, ctxt: FnCtxt, ident: &Ident, sig: &FnSig) {
+    /// Check that the signature of this function does not violate the constraints of its ABI.
+    fn check_extern_fn_signature(&self, abi: ExternAbi, ctxt: FnCtxt, ident: &Ident, sig: &FnSig) {
+        match AbiMap::from_target(&self.sess.target).canonize_abi(abi, false) {
+            AbiMapping::Direct(canon_abi) | AbiMapping::Deprecated(canon_abi) => {
+                match canon_abi {
+                    CanonAbi::C
+                    | CanonAbi::Rust
+                    | CanonAbi::RustCold
+                    | CanonAbi::Arm(_)
+                    | CanonAbi::GpuKernel
+                    | CanonAbi::X86(_) => { /* nothing to check */ }
+
+                    CanonAbi::Custom => {
+                        // An `extern "custom"` function must be unsafe.
+                        self.reject_safe_fn(abi, ctxt, sig);
+
+                        // An `extern "custom"` function cannot be `async` and/or `gen`.
+                        self.reject_coroutine(abi, sig);
+
+                        // An `extern "custom"` function must have type `fn()`.
+                        self.reject_params_or_return(abi, ident, sig);
+                    }
+
+                    CanonAbi::Interrupt(interrupt_kind) => {
+                        // An interrupt handler cannot be `async` and/or `gen`.
+                        self.reject_coroutine(abi, sig);
+
+                        if let InterruptKind::X86 = interrupt_kind {
+                            // "x86-interrupt" is special because it does have arguments.
+                            // FIXME(workingjubilee): properly lint on acceptable input types.
+                            let inputs = &sig.decl.inputs;
+                            let param_count = inputs.len();
+                            if !matches!(param_count, 1 | 2) {
+                                let mut spans: Vec<Span> =
+                                    inputs.iter().map(|arg| arg.span).collect();
+                                if spans.is_empty() {
+                                    spans = vec![sig.span];
+                                }
+                                self.dcx().emit_err(errors::AbiX86Interrupt { spans, param_count });
+                            }
+
+                            if let FnRetTy::Ty(ref ret_ty) = sig.decl.output
+                                && match &ret_ty.kind {
+                                    TyKind::Never => false,
+                                    TyKind::Tup(tup) if tup.is_empty() => false,
+                                    _ => true,
+                                }
+                            {
+                                self.dcx().emit_err(errors::AbiMustNotHaveReturnType {
+                                    span: ret_ty.span,
+                                    abi,
+                                });
+                            }
+                        } else {
+                            // An `extern "interrupt"` function must have type `fn()`.
+                            self.reject_params_or_return(abi, ident, sig);
+                        }
+                    }
+                }
+            }
+            AbiMapping::Invalid => { /* ignore */ }
+        }
+    }
+
+    fn reject_safe_fn(&self, abi: ExternAbi, ctxt: FnCtxt, sig: &FnSig) {
         let dcx = self.dcx();
 
-        // An `extern "custom"` function must be unsafe.
         match sig.header.safety {
             Safety::Unsafe(_) => { /* all good */ }
             Safety::Safe(safe_span) => {
-                let safe_span =
-                    self.sess.psess.source_map().span_until_non_whitespace(safe_span.to(sig.span));
+                let source_map = self.sess.psess.source_map();
+                let safe_span = source_map.span_until_non_whitespace(safe_span.to(sig.span));
                 dcx.emit_err(errors::AbiCustomSafeForeignFunction { span: sig.span, safe_span });
             }
             Safety::Default => match ctxt {
                 FnCtxt::Foreign => { /* all good */ }
                 FnCtxt::Free | FnCtxt::Assoc(_) => {
-                    self.dcx().emit_err(errors::AbiCustomSafeFunction {
+                    dcx.emit_err(errors::AbiCustomSafeFunction {
                         span: sig.span,
+                        abi,
                         unsafe_span: sig.span.shrink_to_lo(),
                     });
                 }
             },
         }
+    }
 
-        // An `extern "custom"` function cannot be `async` and/or `gen`.
+    fn reject_coroutine(&self, abi: ExternAbi, sig: &FnSig) {
         if let Some(coroutine_kind) = sig.header.coroutine_kind {
             let coroutine_kind_span = self
                 .sess
@@ -397,16 +470,24 @@ impl<'a> AstValidator<'a> {
                 .source_map()
                 .span_until_non_whitespace(coroutine_kind.span().to(sig.span));
 
-            self.dcx().emit_err(errors::AbiCustomCoroutine {
+            self.dcx().emit_err(errors::AbiCannotBeCoroutine {
                 span: sig.span,
+                abi,
                 coroutine_kind_span,
                 coroutine_kind_str: coroutine_kind.as_str(),
             });
         }
+    }
 
-        // An `extern "custom"` function must not have any parameters or return type.
+    fn reject_params_or_return(&self, abi: ExternAbi, ident: &Ident, sig: &FnSig) {
         let mut spans: Vec<_> = sig.decl.inputs.iter().map(|p| p.span).collect();
-        if let FnRetTy::Ty(ref ret_ty) = sig.decl.output {
+        if let FnRetTy::Ty(ref ret_ty) = sig.decl.output
+            && match &ret_ty.kind {
+                TyKind::Never => false,
+                TyKind::Tup(tup) if tup.is_empty() => false,
+                _ => true,
+            }
+        {
             spans.push(ret_ty.span);
         }
 
@@ -415,11 +496,12 @@ impl<'a> AstValidator<'a> {
             let suggestion_span = header_span.shrink_to_hi().to(sig.decl.output.span());
             let padding = if header_span.is_empty() { "" } else { " " };
 
-            self.dcx().emit_err(errors::AbiCustomInvalidSignature {
+            self.dcx().emit_err(errors::AbiMustNotHaveParametersOrReturnType {
                 spans,
                 symbol: ident.name,
                 suggestion_span,
                 padding,
+                abi,
             });
         }
     }
@@ -449,9 +531,9 @@ impl<'a> AstValidator<'a> {
         }
     }
 
-    fn check_bare_fn_safety(&self, span: Span, safety: Safety) {
+    fn check_fn_ptr_safety(&self, span: Span, safety: Safety) {
         if matches!(safety, Safety::Safe(_)) {
-            self.dcx().emit_err(errors::InvalidSafetyOnBareFn { span });
+            self.dcx().emit_err(errors::InvalidSafetyOnFnPtr { span });
         }
     }
 
@@ -595,16 +677,16 @@ impl<'a> AstValidator<'a> {
             return;
         }
 
-        if let Some(header) = fk.header() {
-            if let Const::Yes(const_span) = header.constness {
-                let mut spans = variadic_spans.clone();
-                spans.push(const_span);
-                self.dcx().emit_err(errors::ConstAndCVariadic {
-                    spans,
-                    const_span,
-                    variadic_spans: variadic_spans.clone(),
-                });
-            }
+        if let Some(header) = fk.header()
+            && let Const::Yes(const_span) = header.constness
+        {
+            let mut spans = variadic_spans.clone();
+            spans.push(const_span);
+            self.dcx().emit_err(errors::ConstAndCVariadic {
+                spans,
+                const_span,
+                variadic_spans: variadic_spans.clone(),
+            });
         }
 
         match (fk.ctxt(), fk.header()) {
@@ -654,23 +736,27 @@ impl<'a> AstValidator<'a> {
         }
     }
 
-    fn deny_super_traits(&self, bounds: &GenericBounds, ident_span: Span) {
+    fn deny_super_traits(&self, bounds: &GenericBounds, ident: Span) {
         if let [.., last] = &bounds[..] {
-            let span = ident_span.shrink_to_hi().to(last.span());
-            self.dcx().emit_err(errors::AutoTraitBounds { span, ident: ident_span });
+            let span = bounds.iter().map(|b| b.span()).collect();
+            let removal = ident.shrink_to_hi().to(last.span());
+            self.dcx().emit_err(errors::AutoTraitBounds { span, removal, ident });
         }
     }
 
-    fn deny_where_clause(&self, where_clause: &WhereClause, ident_span: Span) {
+    fn deny_where_clause(&self, where_clause: &WhereClause, ident: Span) {
         if !where_clause.predicates.is_empty() {
             // FIXME: The current diagnostic is misleading since it only talks about
             // super trait and lifetime bounds while we should just say “bounds”.
-            self.dcx()
-                .emit_err(errors::AutoTraitBounds { span: where_clause.span, ident: ident_span });
+            self.dcx().emit_err(errors::AutoTraitBounds {
+                span: vec![where_clause.span],
+                removal: where_clause.span,
+                ident,
+            });
         }
     }
 
-    fn deny_items(&self, trait_items: &[P<AssocItem>], ident_span: Span) {
+    fn deny_items(&self, trait_items: &[Box<AssocItem>], ident_span: Span) {
         if !trait_items.is_empty() {
             let spans: Vec<_> = trait_items.iter().map(|i| i.kind.ident().unwrap().span).collect();
             let total = trait_items.first().unwrap().span.to(trait_items.last().unwrap().span);
@@ -735,8 +821,8 @@ impl<'a> AstValidator<'a> {
 
     fn visit_ty_common(&mut self, ty: &'a Ty) {
         match &ty.kind {
-            TyKind::BareFn(bfty) => {
-                self.check_bare_fn_safety(bfty.decl_span, bfty.safety);
+            TyKind::FnPtr(bfty) => {
+                self.check_fn_ptr_safety(bfty.decl_span, bfty.safety);
                 self.check_fn_decl(&bfty.decl, SelfSemantic::No);
                 Self::check_decl_no_pat(&bfty.decl, |span, _, _| {
                     self.dcx().emit_err(errors::PatternFnPointer { span });
@@ -790,7 +876,7 @@ impl<'a> AstValidator<'a> {
                 MISSING_ABI,
                 id,
                 span,
-                BuiltinLintDiag::MissingAbi(span, ExternAbi::FALLBACK),
+                errors::MissingAbiSugg { span, default_abi: ExternAbi::FALLBACK },
             )
         }
     }
@@ -859,11 +945,11 @@ fn validate_generic_param_order(dcx: DiagCtxtHandle<'_>, generics: &[GenericPara
                 }
                 GenericParamKind::Type { default: None } => (),
                 GenericParamKind::Lifetime => (),
-                GenericParamKind::Const { ty: _, kw_span: _, default: Some(default) } => {
+                GenericParamKind::Const { ty: _, span: _, default: Some(default) } => {
                     ordered_params += " = ";
                     ordered_params += &pprust::expr_to_string(&default.value);
                 }
-                GenericParamKind::Const { ty: _, kw_span: _, default: None } => (),
+                GenericParamKind::Const { ty: _, span: _, default: None } => (),
             }
             first = false;
         }
@@ -906,13 +992,16 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
         }
 
         match &item.kind {
-            ItemKind::Impl(box Impl {
-                safety,
-                polarity,
-                defaultness: _,
-                constness,
+            ItemKind::Impl(Impl {
                 generics,
-                of_trait: Some(t),
+                of_trait:
+                    Some(box TraitImplHeader {
+                        safety,
+                        polarity,
+                        defaultness: _,
+                        constness,
+                        trait_ref: t,
+                    }),
                 self_ty,
                 items,
             }) => {
@@ -944,46 +1033,12 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
                     walk_list!(this, visit_assoc_item, items, AssocCtxt::Impl { of_trait: true });
                 });
             }
-            ItemKind::Impl(box Impl {
-                safety,
-                polarity,
-                defaultness,
-                constness,
-                generics,
-                of_trait: None,
-                self_ty,
-                items,
-            }) => {
-                let error = |annotation_span, annotation, only_trait| errors::InherentImplCannot {
-                    span: self_ty.span,
-                    annotation_span,
-                    annotation,
-                    self_ty: self_ty.span,
-                    only_trait,
-                };
-
+            ItemKind::Impl(Impl { generics, of_trait: None, self_ty, items }) => {
                 self.visit_attrs_vis(&item.attrs, &item.vis);
                 self.visibility_not_permitted(
                     &item.vis,
                     errors::VisibilityNotPermittedNote::IndividualImplItems,
                 );
-                if let &Safety::Unsafe(span) = safety {
-                    self.dcx().emit_err(errors::InherentImplCannotUnsafe {
-                        span: self_ty.span,
-                        annotation_span: span,
-                        annotation: "unsafe",
-                        self_ty: self_ty.span,
-                    });
-                }
-                if let &ImplPolarity::Negative(span) = polarity {
-                    self.dcx().emit_err(error(span, "negative", false));
-                }
-                if let &Defaultness::Default(def_span) = defaultness {
-                    self.dcx().emit_err(error(def_span, "`default`", true));
-                }
-                if let &Const::Yes(span) = constness {
-                    self.dcx().emit_err(error(span, "`const`", true));
-                }
 
                 self.with_tilde_const(Some(TildeConstReason::Impl { span: item.span }), |this| {
                     this.visit_generics(generics)
@@ -1079,12 +1134,27 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
                         );
                     }
                 }
-                visit::walk_item(self, item)
+                self.with_tilde_const(Some(TildeConstReason::Enum { span: item.span }), |this| {
+                    visit::walk_item(this, item)
+                });
             }
-            ItemKind::Trait(box Trait { is_auto, generics, ident, bounds, items, .. }) => {
+            ItemKind::Trait(box Trait {
+                constness,
+                is_auto,
+                generics,
+                ident,
+                bounds,
+                items,
+                ..
+            }) => {
                 self.visit_attrs_vis_ident(&item.attrs, &item.vis, ident);
-                let is_const_trait =
+                // FIXME(const_trait_impl) remove this
+                let alt_const_trait_span =
                     attr::find_by_name(&item.attrs, sym::const_trait).map(|attr| attr.span);
+                let constness = match (*constness, alt_const_trait_span) {
+                    (Const::Yes(span), _) | (Const::No, Some(span)) => Const::Yes(span),
+                    (Const::No, None) => Const::No,
+                };
                 if *is_auto == IsAuto::Yes {
                     // Auto traits cannot have generics, super traits nor contain items.
                     self.deny_generic_params(generics, ident.span);
@@ -1095,13 +1165,13 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
 
                 // Equivalent of `visit::walk_item` for `ItemKind::Trait` that inserts a bound
                 // context for the supertraits.
-                let disallowed =
-                    is_const_trait.is_none().then(|| TildeConstReason::Trait { span: item.span });
+                let disallowed = matches!(constness, ast::Const::No)
+                    .then(|| TildeConstReason::Trait { span: item.span });
                 self.with_tilde_const(disallowed, |this| {
                     this.visit_generics(generics);
                     walk_list!(this, visit_param_bound, bounds, BoundKind::SuperTraits)
                 });
-                self.with_in_trait(item.span, is_const_trait, |this| {
+                self.with_in_trait(item.span, constness, |this| {
                     walk_list!(this, visit_assoc_item, items, AssocCtxt::Trait);
                 });
             }
@@ -1110,33 +1180,39 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
                     self.dcx().emit_err(errors::UnsafeItem { span, kind: "module" });
                 }
                 // Ensure that `path` attributes on modules are recorded as used (cf. issue #35584).
-                if !matches!(mod_kind, ModKind::Loaded(_, Inline::Yes, _, _))
+                if !matches!(mod_kind, ModKind::Loaded(_, Inline::Yes, _))
                     && !attr::contains_name(&item.attrs, sym::path)
                 {
                     self.check_mod_file_item_asciionly(*ident);
                 }
                 visit::walk_item(self, item)
             }
-            ItemKind::Struct(ident, generics, vdata) => match vdata {
-                VariantData::Struct { fields, .. } => {
-                    self.visit_attrs_vis_ident(&item.attrs, &item.vis, ident);
-                    self.visit_generics(generics);
-                    walk_list!(self, visit_field_def, fields);
-                }
-                _ => visit::walk_item(self, item),
-            },
+            ItemKind::Struct(ident, generics, vdata) => {
+                self.with_tilde_const(Some(TildeConstReason::Struct { span: item.span }), |this| {
+                    match vdata {
+                        VariantData::Struct { fields, .. } => {
+                            this.visit_attrs_vis_ident(&item.attrs, &item.vis, ident);
+                            this.visit_generics(generics);
+                            walk_list!(this, visit_field_def, fields);
+                        }
+                        _ => visit::walk_item(this, item),
+                    }
+                })
+            }
             ItemKind::Union(ident, generics, vdata) => {
                 if vdata.fields().is_empty() {
                     self.dcx().emit_err(errors::FieldlessUnion { span: item.span });
                 }
-                match vdata {
-                    VariantData::Struct { fields, .. } => {
-                        self.visit_attrs_vis_ident(&item.attrs, &item.vis, ident);
-                        self.visit_generics(generics);
-                        walk_list!(self, visit_field_def, fields);
+                self.with_tilde_const(Some(TildeConstReason::Union { span: item.span }), |this| {
+                    match vdata {
+                        VariantData::Struct { fields, .. } => {
+                            this.visit_attrs_vis_ident(&item.attrs, &item.vis, ident);
+                            this.visit_generics(generics);
+                            walk_list!(this, visit_field_def, fields);
+                        }
+                        _ => visit::walk_item(this, item),
                     }
-                    _ => visit::walk_item(self, item),
-                }
+                });
             }
             ItemKind::Const(box ConstItem { defaultness, expr, .. }) => {
                 self.check_defaultness(item.span, *defaultness);
@@ -1199,9 +1275,12 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
                 self.check_foreign_fn_bodyless(*ident, body.as_deref());
                 self.check_foreign_fn_headerless(sig.header);
                 self.check_foreign_item_ascii_only(*ident);
-                if self.extern_mod_abi == Some(ExternAbi::Custom) {
-                    self.check_custom_abi(FnCtxt::Foreign, ident, sig);
-                }
+                self.check_extern_fn_signature(
+                    self.extern_mod_abi.unwrap_or(ExternAbi::FALLBACK),
+                    FnCtxt::Foreign,
+                    ident,
+                    sig,
+                );
             }
             ForeignItemKind::TyAlias(box TyAlias {
                 defaultness,
@@ -1320,29 +1399,6 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
         match bound {
             GenericBound::Trait(trait_ref) => {
                 match (ctxt, trait_ref.modifiers.constness, trait_ref.modifiers.polarity) {
-                    (BoundKind::SuperTraits, BoundConstness::Never, BoundPolarity::Maybe(_))
-                        if !self.features.more_maybe_bounds() =>
-                    {
-                        self.sess
-                            .create_feature_err(
-                                errors::OptionalTraitSupertrait {
-                                    span: trait_ref.span,
-                                    path_str: pprust::path_to_string(&trait_ref.trait_ref.path),
-                                },
-                                sym::more_maybe_bounds,
-                            )
-                            .emit();
-                    }
-                    (BoundKind::TraitObject, BoundConstness::Never, BoundPolarity::Maybe(_))
-                        if !self.features.more_maybe_bounds() =>
-                    {
-                        self.sess
-                            .create_feature_err(
-                                errors::OptionalTraitObject { span: trait_ref.span },
-                                sym::more_maybe_bounds,
-                            )
-                            .emit();
-                    }
                     (
                         BoundKind::TraitObject,
                         BoundConstness::Always(_),
@@ -1411,9 +1467,9 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
 
         if let FnKind::Fn(ctxt, _, fun) = fk
             && let Extern::Explicit(str_lit, _) = fun.sig.header.ext
-            && let Ok(ExternAbi::Custom) = ExternAbi::from_str(str_lit.symbol.as_str())
+            && let Ok(abi) = ExternAbi::from_str(str_lit.symbol.as_str())
         {
-            self.check_custom_abi(ctxt, &fun.ident, &fun.sig);
+            self.check_extern_fn_signature(abi, ctxt, &fun.ident, &fun.sig);
         }
 
         self.check_c_variadic_type(fk);
@@ -1548,6 +1604,7 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
             self.visibility_not_permitted(&item.vis, errors::VisibilityNotPermittedNote::TraitImpl);
             if let AssocItemKind::Fn(box Fn { sig, .. }) = &item.kind {
                 self.check_trait_fn_not_const(sig.header.constness, parent);
+                self.check_async_fn_in_const_trait_or_impl(sig, parent);
             }
         }
 
@@ -1584,6 +1641,13 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
             }
             _ => self.with_in_trait_impl(None, |this| visit::walk_assoc_item(this, item, ctxt)),
         }
+    }
+
+    fn visit_anon_const(&mut self, anon_const: &'a AnonConst) {
+        self.with_tilde_const(
+            Some(TildeConstReason::AnonConst { span: anon_const.value.span }),
+            |this| visit::walk_anon_const(this, anon_const),
+        )
     }
 }
 
@@ -1716,7 +1780,7 @@ fn deny_equality_constraints(
                         .map(|segment| segment.ident.name)
                         .zip(poly.trait_ref.path.segments.iter().map(|segment| segment.ident.name))
                         .all(|(a, b)| a == b)
-                        && let Some(potential_assoc) = full_path.segments.iter().last()
+                        && let Some(potential_assoc) = full_path.segments.last()
                     {
                         suggest(poly, potential_assoc, predicate);
                     }

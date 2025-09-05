@@ -24,6 +24,9 @@ use crate::ty::{EarlyBinder, ImplSubject, TyCtxt};
 /// bodies. The Ids are in visitor order. This is used to partition a pass between modules.
 #[derive(Debug, HashStable, Encodable, Decodable)]
 pub struct ModuleItems {
+    /// Whether this represents the whole crate, in which case we need to add `CRATE_OWNER_ID` to
+    /// the iterators if we want to account for the crate root.
+    add_root: bool,
     submodules: Box<[OwnerId]>,
     free_items: Box<[ItemId]>,
     trait_items: Box<[TraitItemId]>,
@@ -66,9 +69,10 @@ impl ModuleItems {
     }
 
     pub fn owners(&self) -> impl Iterator<Item = OwnerId> {
-        self.free_items
-            .iter()
-            .map(|id| id.owner_id)
+        self.add_root
+            .then_some(CRATE_OWNER_ID)
+            .into_iter()
+            .chain(self.free_items.iter().map(|id| id.owner_id))
             .chain(self.trait_items.iter().map(|id| id.owner_id))
             .chain(self.impl_items.iter().map(|id| id.owner_id))
             .chain(self.foreign_items.iter().map(|id| id.owner_id))
@@ -170,34 +174,50 @@ impl<'tcx> TyCtxt<'tcx> {
         attrs: &SortedMap<ItemLocalId, &[Attribute]>,
         delayed_lints: &[DelayedLint],
         define_opaque: Option<&[(Span, LocalDefId)]>,
-    ) -> (Option<Fingerprint>, Option<Fingerprint>, Option<Fingerprint>) {
-        if self.needs_crate_hash() {
-            self.with_stable_hashing_context(|mut hcx| {
-                let mut stable_hasher = StableHasher::new();
-                node.hash_stable(&mut hcx, &mut stable_hasher);
-                // Bodies are stored out of line, so we need to pull them explicitly in the hash.
-                bodies.hash_stable(&mut hcx, &mut stable_hasher);
-                let h1 = stable_hasher.finish();
-
-                let mut stable_hasher = StableHasher::new();
-                attrs.hash_stable(&mut hcx, &mut stable_hasher);
-
-                // Hash the defined opaque types, which are not present in the attrs.
-                define_opaque.hash_stable(&mut hcx, &mut stable_hasher);
-
-                let h2 = stable_hasher.finish();
-
-                // hash lints emitted during ast lowering
-                let mut stable_hasher = StableHasher::new();
-                delayed_lints.hash_stable(&mut hcx, &mut stable_hasher);
-                let h3 = stable_hasher.finish();
-
-                (Some(h1), Some(h2), Some(h3))
-            })
-        } else {
-            (None, None, None)
+    ) -> Hashes {
+        if !self.needs_crate_hash() {
+            return Hashes {
+                opt_hash_including_bodies: None,
+                attrs_hash: None,
+                delayed_lints_hash: None,
+            };
         }
+
+        self.with_stable_hashing_context(|mut hcx| {
+            let mut stable_hasher = StableHasher::new();
+            node.hash_stable(&mut hcx, &mut stable_hasher);
+            // Bodies are stored out of line, so we need to pull them explicitly in the hash.
+            bodies.hash_stable(&mut hcx, &mut stable_hasher);
+            let h1 = stable_hasher.finish();
+
+            let mut stable_hasher = StableHasher::new();
+            attrs.hash_stable(&mut hcx, &mut stable_hasher);
+
+            // Hash the defined opaque types, which are not present in the attrs.
+            define_opaque.hash_stable(&mut hcx, &mut stable_hasher);
+
+            let h2 = stable_hasher.finish();
+
+            // hash lints emitted during ast lowering
+            let mut stable_hasher = StableHasher::new();
+            delayed_lints.hash_stable(&mut hcx, &mut stable_hasher);
+            let h3 = stable_hasher.finish();
+
+            Hashes {
+                opt_hash_including_bodies: Some(h1),
+                attrs_hash: Some(h2),
+                delayed_lints_hash: Some(h3),
+            }
+        })
     }
+}
+
+/// Hashes computed by [`TyCtxt::hash_owner_nodes`] if necessary.
+#[derive(Clone, Copy, Debug)]
+pub struct Hashes {
+    pub opt_hash_including_bodies: Option<Fingerprint>,
+    pub attrs_hash: Option<Fingerprint>,
+    pub delayed_lints_hash: Option<Fingerprint>,
 }
 
 pub fn provide(providers: &mut Providers) {
@@ -235,8 +255,16 @@ pub fn provide(providers: &mut Providers) {
         let hir_id = tcx.local_def_id_to_hir_id(def_id);
         tcx.hir_opt_ident_span(hir_id)
     };
+    providers.ty_span = |tcx, def_id| {
+        let node = tcx.hir_node_by_def_id(def_id);
+        match node.ty() {
+            Some(ty) => ty.span,
+            None => bug!("{def_id:?} doesn't have a type: {node:#?}"),
+        }
+    };
     providers.fn_arg_idents = |tcx, def_id| {
-        if let Some(body_id) = tcx.hir_node_by_def_id(def_id).body_id() {
+        let node = tcx.hir_node_by_def_id(def_id);
+        if let Some(body_id) = node.body_id() {
             tcx.arena.alloc_from_iter(tcx.hir_body_param_idents(body_id))
         } else if let Node::TraitItem(&TraitItem {
             kind: TraitItemKind::Fn(_, TraitFn::Required(idents)),
@@ -245,7 +273,7 @@ pub fn provide(providers: &mut Providers) {
         | Node::ForeignItem(&ForeignItem {
             kind: ForeignItemKind::Fn(_, idents, _),
             ..
-        }) = tcx.hir_node(tcx.local_def_id_to_hir_id(def_id))
+        }) = node
         {
             idents
         } else {

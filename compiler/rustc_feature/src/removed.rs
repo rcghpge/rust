@@ -54,6 +54,7 @@ declare_features! (
 
     /// Allows using the `amdgpu-kernel` ABI.
     (removed, abi_amdgpu_kernel, "1.77.0", Some(51575), None, 120495),
+    (removed, abi_c_cmse_nonsecure_call, "1.90.0", Some(81391), Some("renamed to abi_cmse_nonsecure_call"), 142146),
     (removed, advanced_slice_patterns, "1.42.0", Some(62254),
      Some("merged into `#![feature(slice_patterns)]`"), 67712),
     (removed, allocator, "1.0.0", None, None),
@@ -86,7 +87,7 @@ declare_features! (
      Some("at compile-time, pointers do not have an integer value, so these casts cannot be properly supported"), 87020),
     /// Allows `T: ?const Trait` syntax in bounds.
     (removed, const_trait_bound_opt_out, "1.56.0", Some(67794),
-     Some("Removed in favor of `~const` bound in #![feature(const_trait_impl)]"), 88328),
+     Some("Removed in favor of `[const]` bound in #![feature(const_trait_impl)]"), 88328),
     /// Allows using `crate` as visibility modifier, synonymous with `pub(crate)`.
     (removed, crate_visibility_modifier, "1.63.0", Some(53120), Some("removed in favor of `pub(crate)`"), 97254),
     /// Allows using custom attributes (RFC 572).
@@ -122,7 +123,10 @@ declare_features! (
     /// [^1]: Formerly known as "object safe".
     (removed, dyn_compatible_for_dispatch, "1.87.0", Some(43561),
      Some("removed, not used heavily and represented additional complexity in dyn compatibility"), 136522),
-    /// Uses generic effect parameters for ~const bounds
+    /// Allows `dyn* Trait` objects.
+    (removed, dyn_star, "1.65.0", Some(102425),
+     Some("removed as it was no longer necessary for AFIDT (async fn in dyn trait) support")),
+    /// Uses generic effect parameters for [const] bounds
     (removed, effects, "1.84.0", Some(102090),
      Some("removed, redundant with `#![feature(const_trait_impl)]`"), 132479),
     /// Allows defining `existential type`s.
@@ -186,6 +190,9 @@ declare_features! (
     (removed, no_coverage, "1.74.0", Some(84605), Some("renamed to `coverage_attribute`"), 114656),
     /// Allows `#[no_debug]`.
     (removed, no_debug, "1.43.0", Some(29721), Some("removed due to lack of demand"), 69667),
+    // Allows the use of `no_sanitize` attribute.
+    /// The feature was renamed to `sanitize` and the attribute to `#[sanitize(xyz = "on|off")]`
+    (removed, no_sanitize, "CURRENT_RUSTC_VERSION", Some(39699), Some(r#"renamed to sanitize(xyz = "on|off")"#), 142681),
     /// Note: this feature was previously recorded in a separate
     /// `STABLE_REMOVED` list because it, uniquely, was once stable but was
     /// then removed. But there was no utility storing it separately, so now
@@ -195,6 +202,8 @@ declare_features! (
     /// Renamed to `dyn_compatible_for_dispatch`.
     (removed, object_safe_for_dispatch, "1.83.0", Some(43561),
      Some("renamed to `dyn_compatible_for_dispatch`"), 131511),
+    /// Allows using `#[omit_gdb_pretty_printer_section]`.
+    (removed, omit_gdb_pretty_printer_section, "CURRENT_RUSTC_VERSION", None, None, 144738),
     /// Allows using `#[on_unimplemented(..)]` on traits.
     /// (Moved to `rustc_attrs`.)
     (removed, on_unimplemented, "1.40.0", None, None, 65794),
@@ -221,7 +230,7 @@ declare_features! (
     /// Allows exhaustive integer pattern matching with `usize::MAX`/`isize::MIN`/`isize::MAX`.
     (removed, precise_pointer_size_matching, "1.76.0", Some(56354),
      Some("removed in favor of half-open ranges"), 118598),
-    (removed, pref_align_of, "CURRENT_RUSTC_VERSION", Some(91971),
+    (removed, pref_align_of, "1.89.0", Some(91971),
      Some("removed due to marginal use and inducing compiler complications")),
     (removed, proc_macro_expr, "1.27.0", Some(54727),
      Some("subsumed by `#![feature(proc_macro_hygiene)]`"), 52121),
@@ -264,7 +273,7 @@ declare_features! (
     (removed, unnamed_fields, "1.83.0", Some(49804), Some("feature needs redesign"), 131045),
     (removed, unsafe_no_drop_flag, "1.0.0", None, None),
     /// Allows unsized rvalues at arguments and parameters.
-    (removed, unsized_locals, "CURRENT_RUSTC_VERSION", Some(48055), Some("removed due to implementation concerns; see https://github.com/rust-lang/rust/issues/111942")),
+    (removed, unsized_locals, "1.89.0", Some(48055), Some("removed due to implementation concerns; see https://github.com/rust-lang/rust/issues/111942")),
     (removed, unsized_tuple_coercion, "1.87.0", Some(42877),
      Some("The feature restricts possible layouts for tuples, and this restriction is not worth it."), 137728),
     /// Allows `union` fields that don't implement `Copy` as long as they don't have any drop glue.
@@ -284,5 +293,19 @@ declare_features! (
 
     // -------------------------------------------------------------------------
     // feature-group-end: removed features
+    // -------------------------------------------------------------------------
+
+
+    // -------------------------------------------------------------------------
+    // feature-group-start: removed library features
+    // -------------------------------------------------------------------------
+    //
+    // FIXME(#141617): we should have a better way to track removed library features, but we reuse
+    // the infrastructure here so users still get hints. The symbols used here can be remove from
+    // `symbol.rs` when that happens.
+    (removed, concat_idents, "1.90.0", Some(29599),
+     Some("use the `${concat(..)}` metavariable expression instead"), 142704),
+    // -------------------------------------------------------------------------
+    // feature-group-end: removed library features
     // -------------------------------------------------------------------------
 );

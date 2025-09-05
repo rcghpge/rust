@@ -123,15 +123,15 @@ impl PathResolutionPerNs {
 }
 
 #[derive(Debug)]
-pub struct TypeInfo {
+pub struct TypeInfo<'db> {
     /// The original type of the expression or pattern.
-    pub original: Type,
+    pub original: Type<'db>,
     /// The adjusted type, if an adjustment happened.
-    pub adjusted: Option<Type>,
+    pub adjusted: Option<Type<'db>>,
 }
 
-impl TypeInfo {
-    pub fn original(self) -> Type {
+impl<'db> TypeInfo<'db> {
+    pub fn original(self) -> Type<'db> {
         self.original
     }
 
@@ -140,7 +140,7 @@ impl TypeInfo {
     }
 
     /// The adjusted type, or the original in case no adjustments occurred.
-    pub fn adjusted(self) -> Type {
+    pub fn adjusted(self) -> Type<'db> {
         self.adjusted.unwrap_or(self.original)
     }
 }
@@ -677,8 +677,7 @@ impl<'db> SemanticsImpl<'db> {
     pub fn rename_conflicts(&self, to_be_renamed: &Local, new_name: &Name) -> Vec<Local> {
         let body = self.db.body(to_be_renamed.parent);
         let resolver = to_be_renamed.parent.resolver(self.db);
-        let starting_expr =
-            body.binding_owners.get(&to_be_renamed.binding_id).copied().unwrap_or(body.body_expr);
+        let starting_expr = body.binding_owner(to_be_renamed.binding_id).unwrap_or(body.body_expr);
         let mut visitor = RenameConflictsVisitor {
             body: &body,
             conflicts: FxHashSet::default(),
@@ -934,19 +933,18 @@ impl<'db> SemanticsImpl<'db> {
                 InFile::new(file.file_id, last),
                 false,
                 &mut |InFile { value: last, file_id: last_fid }, _ctx| {
-                    if let Some(InFile { value: first, file_id: first_fid }) = scratch.next() {
-                        if first_fid == last_fid {
-                            if let Some(p) = first.parent() {
-                                let range = first.text_range().cover(last.text_range());
-                                let node = find_root(&p)
-                                    .covering_element(range)
-                                    .ancestors()
-                                    .take_while(|it| it.text_range() == range)
-                                    .find_map(N::cast);
-                                if let Some(node) = node {
-                                    res.push(node);
-                                }
-                            }
+                    if let Some(InFile { value: first, file_id: first_fid }) = scratch.next()
+                        && first_fid == last_fid
+                        && let Some(p) = first.parent()
+                    {
+                        let range = first.text_range().cover(last.text_range());
+                        let node = find_root(&p)
+                            .covering_element(range)
+                            .ancestors()
+                            .take_while(|it| it.text_range() == range)
+                            .find_map(N::cast);
+                        if let Some(node) = node {
+                            res.push(node);
                         }
                     }
                 },
@@ -1392,10 +1390,10 @@ impl<'db> SemanticsImpl<'db> {
                     }
                 })()
                 .is_none();
-                if was_not_remapped {
-                    if let ControlFlow::Break(b) = f(InFile::new(expansion, token), ctx) {
-                        return Some(b);
-                    }
+                if was_not_remapped
+                    && let ControlFlow::Break(b) = f(InFile::new(expansion, token), ctx)
+                {
+                    return Some(b);
                 }
             }
         }
@@ -1534,7 +1532,7 @@ impl<'db> SemanticsImpl<'db> {
         Some(Label { parent, label_id })
     }
 
-    pub fn resolve_type(&self, ty: &ast::Type) -> Option<Type> {
+    pub fn resolve_type(&self, ty: &ast::Type) -> Option<Type<'db>> {
         let analyze = self.analyze(ty.syntax())?;
         analyze.type_of_type(self.db, ty)
     }
@@ -1553,7 +1551,7 @@ impl<'db> SemanticsImpl<'db> {
         }
     }
 
-    pub fn expr_adjustments(&self, expr: &ast::Expr) -> Option<Vec<Adjustment>> {
+    pub fn expr_adjustments(&self, expr: &ast::Expr) -> Option<Vec<Adjustment<'db>>> {
         let mutability = |m| match m {
             hir_ty::Mutability::Not => Mutability::Shared,
             hir_ty::Mutability::Mut => Mutability::Mut,
@@ -1596,13 +1594,13 @@ impl<'db> SemanticsImpl<'db> {
         })
     }
 
-    pub fn type_of_expr(&self, expr: &ast::Expr) -> Option<TypeInfo> {
+    pub fn type_of_expr(&self, expr: &ast::Expr) -> Option<TypeInfo<'db>> {
         self.analyze(expr.syntax())?
             .type_of_expr(self.db, expr)
             .map(|(ty, coerced)| TypeInfo { original: ty, adjusted: coerced })
     }
 
-    pub fn type_of_pat(&self, pat: &ast::Pat) -> Option<TypeInfo> {
+    pub fn type_of_pat(&self, pat: &ast::Pat) -> Option<TypeInfo<'db>> {
         self.analyze(pat.syntax())?
             .type_of_pat(self.db, pat)
             .map(|(ty, coerced)| TypeInfo { original: ty, adjusted: coerced })
@@ -1611,15 +1609,15 @@ impl<'db> SemanticsImpl<'db> {
     /// It also includes the changes that binding mode makes in the type. For example in
     /// `let ref x @ Some(_) = None` the result of `type_of_pat` is `Option<T>` but the result
     /// of this function is `&mut Option<T>`
-    pub fn type_of_binding_in_pat(&self, pat: &ast::IdentPat) -> Option<Type> {
+    pub fn type_of_binding_in_pat(&self, pat: &ast::IdentPat) -> Option<Type<'db>> {
         self.analyze(pat.syntax())?.type_of_binding_in_pat(self.db, pat)
     }
 
-    pub fn type_of_self(&self, param: &ast::SelfParam) -> Option<Type> {
+    pub fn type_of_self(&self, param: &ast::SelfParam) -> Option<Type<'db>> {
         self.analyze(param.syntax())?.type_of_self(self.db, param)
     }
 
-    pub fn pattern_adjustments(&self, pat: &ast::Pat) -> SmallVec<[Type; 1]> {
+    pub fn pattern_adjustments(&self, pat: &ast::Pat) -> SmallVec<[Type<'db>; 1]> {
         self.analyze(pat.syntax())
             .and_then(|it| it.pattern_adjustments(self.db, pat))
             .unwrap_or_default()
@@ -1629,7 +1627,7 @@ impl<'db> SemanticsImpl<'db> {
         self.analyze(pat.syntax())?.binding_mode_of_pat(self.db, pat)
     }
 
-    pub fn resolve_expr_as_callable(&self, call: &ast::Expr) -> Option<Callable> {
+    pub fn resolve_expr_as_callable(&self, call: &ast::Expr) -> Option<Callable<'db>> {
         self.analyze(call.syntax())?.resolve_expr_as_callable(self.db, call)
     }
 
@@ -1641,7 +1639,7 @@ impl<'db> SemanticsImpl<'db> {
     pub fn resolve_method_call_fallback(
         &self,
         call: &ast::MethodCallExpr,
-    ) -> Option<(Either<Function, Field>, Option<GenericSubstitution>)> {
+    ) -> Option<(Either<Function, Field>, Option<GenericSubstitution<'db>>)> {
         self.analyze(call.syntax())?.resolve_method_call_fallback(self.db, call)
     }
 
@@ -1649,10 +1647,10 @@ impl<'db> SemanticsImpl<'db> {
     // FIXME: better api for the trait environment
     pub fn resolve_trait_impl_method(
         &self,
-        env: Type,
+        env: Type<'db>,
         trait_: Trait,
         func: Function,
-        subst: impl IntoIterator<Item = Type>,
+        subst: impl IntoIterator<Item = Type<'db>>,
     ) -> Option<Function> {
         let mut substs = hir_ty::TyBuilder::subst_for_def(self.db, TraitId::from(trait_), None);
         for s in subst {
@@ -1691,7 +1689,10 @@ impl<'db> SemanticsImpl<'db> {
 
     // This does not resolve the method call to the correct trait impl!
     // We should probably fix that.
-    pub fn resolve_method_call_as_callable(&self, call: &ast::MethodCallExpr) -> Option<Callable> {
+    pub fn resolve_method_call_as_callable(
+        &self,
+        call: &ast::MethodCallExpr,
+    ) -> Option<Callable<'db>> {
         self.analyze(call.syntax())?.resolve_method_call_as_callable(self.db, call)
     }
 
@@ -1702,14 +1703,15 @@ impl<'db> SemanticsImpl<'db> {
     pub fn resolve_field_fallback(
         &self,
         field: &ast::FieldExpr,
-    ) -> Option<(Either<Either<Field, TupleField>, Function>, Option<GenericSubstitution>)> {
+    ) -> Option<(Either<Either<Field, TupleField>, Function>, Option<GenericSubstitution<'db>>)>
+    {
         self.analyze(field.syntax())?.resolve_field_fallback(self.db, field)
     }
 
     pub fn resolve_record_field(
         &self,
         field: &ast::RecordExprField,
-    ) -> Option<(Field, Option<Local>, Type)> {
+    ) -> Option<(Field, Option<Local>, Type<'db>)> {
         self.resolve_record_field_with_substitution(field)
             .map(|(field, local, ty, _)| (field, local, ty))
     }
@@ -1717,18 +1719,21 @@ impl<'db> SemanticsImpl<'db> {
     pub fn resolve_record_field_with_substitution(
         &self,
         field: &ast::RecordExprField,
-    ) -> Option<(Field, Option<Local>, Type, GenericSubstitution)> {
+    ) -> Option<(Field, Option<Local>, Type<'db>, GenericSubstitution<'db>)> {
         self.analyze(field.syntax())?.resolve_record_field(self.db, field)
     }
 
-    pub fn resolve_record_pat_field(&self, field: &ast::RecordPatField) -> Option<(Field, Type)> {
+    pub fn resolve_record_pat_field(
+        &self,
+        field: &ast::RecordPatField,
+    ) -> Option<(Field, Type<'db>)> {
         self.resolve_record_pat_field_with_subst(field).map(|(field, ty, _)| (field, ty))
     }
 
     pub fn resolve_record_pat_field_with_subst(
         &self,
         field: &ast::RecordPatField,
-    ) -> Option<(Field, Type, GenericSubstitution)> {
+    ) -> Option<(Field, Type<'db>, GenericSubstitution<'db>)> {
         self.analyze(field.syntax())?.resolve_record_pat_field(self.db, field)
     }
 
@@ -1769,7 +1774,7 @@ impl<'db> SemanticsImpl<'db> {
 
     pub fn is_unsafe_macro_call(&self, macro_call: &ast::MacroCall) -> bool {
         let Some(mac) = self.resolve_macro_call(macro_call) else { return false };
-        if mac.is_asm_or_global_asm(self.db) {
+        if mac.is_asm_like(self.db) {
             return true;
         }
 
@@ -1801,7 +1806,7 @@ impl<'db> SemanticsImpl<'db> {
     pub fn resolve_path_with_subst(
         &self,
         path: &ast::Path,
-    ) -> Option<(PathResolution, Option<GenericSubstitution>)> {
+    ) -> Option<(PathResolution, Option<GenericSubstitution<'db>>)> {
         self.analyze(path.syntax())?.resolve_path(self.db, path)
     }
 
@@ -1812,7 +1817,7 @@ impl<'db> SemanticsImpl<'db> {
     pub fn resolve_offset_of_field(
         &self,
         name_ref: &ast::NameRef,
-    ) -> Option<(Either<Variant, Field>, GenericSubstitution)> {
+    ) -> Option<(Either<Variant, Field>, GenericSubstitution<'db>)> {
         self.analyze_no_infer(name_ref.syntax())?.resolve_offset_of_field(self.db, name_ref)
     }
 
@@ -1834,13 +1839,19 @@ impl<'db> SemanticsImpl<'db> {
         self.analyze(pat.syntax())?.resolve_bind_pat_to_const(self.db, pat)
     }
 
-    pub fn record_literal_missing_fields(&self, literal: &ast::RecordExpr) -> Vec<(Field, Type)> {
+    pub fn record_literal_missing_fields(
+        &self,
+        literal: &ast::RecordExpr,
+    ) -> Vec<(Field, Type<'db>)> {
         self.analyze(literal.syntax())
             .and_then(|it| it.record_literal_missing_fields(self.db, literal))
             .unwrap_or_default()
     }
 
-    pub fn record_pattern_missing_fields(&self, pattern: &ast::RecordPat) -> Vec<(Field, Type)> {
+    pub fn record_pattern_missing_fields(
+        &self,
+        pattern: &ast::RecordPat,
+    ) -> Vec<(Field, Type<'db>)> {
         self.analyze(pattern.syntax())
             .and_then(|it| it.record_pattern_missing_fields(self.db, pattern))
             .unwrap_or_default()
@@ -2056,14 +2067,12 @@ impl<'db> SemanticsImpl<'db> {
                 break false;
             }
 
-            if let Some(parent) = ast::Expr::cast(parent.clone()) {
-                if let Some(ExprOrPatId::ExprId(expr_id)) =
+            if let Some(parent) = ast::Expr::cast(parent.clone())
+                && let Some(ExprOrPatId::ExprId(expr_id)) =
                     source_map.node_expr(InFile { file_id, value: &parent })
-                {
-                    if let Expr::Unsafe { .. } = body[expr_id] {
-                        break true;
-                    }
-                }
+                && let Expr::Unsafe { .. } = body[expr_id]
+            {
+                break true;
             }
 
             let Some(parent_) = parent.parent() else { break false };
@@ -2186,6 +2195,10 @@ pub struct SemanticsScope<'db> {
 }
 
 impl<'db> SemanticsScope<'db> {
+    pub fn file_id(&self) -> HirFileId {
+        self.file_id
+    }
+
     pub fn module(&self) -> Module {
         Module { id: self.resolver.module() }
     }
@@ -2338,32 +2351,30 @@ struct RenameConflictsVisitor<'a> {
 
 impl RenameConflictsVisitor<'_> {
     fn resolve_path(&mut self, node: ExprOrPatId, path: &Path) {
-        if let Path::BarePath(path) = path {
-            if let Some(name) = path.as_ident() {
-                if *name.symbol() == self.new_name {
-                    if let Some(conflicting) = self.resolver.rename_will_conflict_with_renamed(
-                        self.db,
-                        name,
-                        path,
-                        self.body.expr_or_pat_path_hygiene(node),
-                        self.to_be_renamed,
-                    ) {
-                        self.conflicts.insert(conflicting);
-                    }
-                } else if *name.symbol() == self.old_name {
-                    if let Some(conflicting) =
-                        self.resolver.rename_will_conflict_with_another_variable(
-                            self.db,
-                            name,
-                            path,
-                            self.body.expr_or_pat_path_hygiene(node),
-                            &self.new_name,
-                            self.to_be_renamed,
-                        )
-                    {
-                        self.conflicts.insert(conflicting);
-                    }
+        if let Path::BarePath(path) = path
+            && let Some(name) = path.as_ident()
+        {
+            if *name.symbol() == self.new_name {
+                if let Some(conflicting) = self.resolver.rename_will_conflict_with_renamed(
+                    self.db,
+                    name,
+                    path,
+                    self.body.expr_or_pat_path_hygiene(node),
+                    self.to_be_renamed,
+                ) {
+                    self.conflicts.insert(conflicting);
                 }
+            } else if *name.symbol() == self.old_name
+                && let Some(conflicting) = self.resolver.rename_will_conflict_with_another_variable(
+                    self.db,
+                    name,
+                    path,
+                    self.body.expr_or_pat_path_hygiene(node),
+                    &self.new_name,
+                    self.to_be_renamed,
+                )
+            {
+                self.conflicts.insert(conflicting);
             }
         }
     }

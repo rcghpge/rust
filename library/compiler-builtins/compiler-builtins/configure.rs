@@ -1,6 +1,6 @@
 // Configuration that is shared between `compiler_builtins` and `builtins_test`.
 
-use std::env;
+use std::{env, str};
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -16,6 +16,8 @@ pub struct Target {
     pub pointer_width: u8,
     pub little_endian: bool,
     pub features: Vec<String>,
+    pub reliable_f128: bool,
+    pub reliable_f16: bool,
 }
 
 impl Target {
@@ -51,6 +53,10 @@ impl Target {
                 .split(",")
                 .map(ToOwned::to_owned)
                 .collect(),
+            // Note that these are unstable options, so only show up with the nightly compiler or
+            // with `RUSTC_BOOTSTRAP=1` (which is required to use the types anyway).
+            reliable_f128: env::var_os("CARGO_CFG_TARGET_HAS_RELIABLE_F128").is_some(),
+            reliable_f16: env::var_os("CARGO_CFG_TARGET_HAS_RELIABLE_F16").is_some(),
         }
     }
 
@@ -74,63 +80,31 @@ pub fn configure_aliases(target: &Target) {
     if target.triple_split[0] == "thumbv6m" || target.triple_split[0] == "thumbv8m.base" {
         println!("cargo:rustc-cfg=thumb_1")
     }
-}
 
-/// Configure whether or not `f16` and `f128` support should be enabled.
-pub fn configure_f16_f128(target: &Target) {
-    // Set whether or not `f16` and `f128` are supported at a basic level by LLVM. This only means
-    // that the backend will not crash when using these types and generates code that can be called
-    // without crashing (no infinite recursion). This does not mean that the platform doesn't have
-    // ABI or other bugs.
-    //
-    // We do this here rather than in `rust-lang/rust` because configuring via cargo features is
-    // not straightforward.
-    //
-    // Original source of this list:
-    // <https://github.com/rust-lang/compiler-builtins/pull/652#issuecomment-2266151350>
-    let f16_enabled = match target.arch.as_str() {
-        // Unsupported <https://github.com/llvm/llvm-project/issues/94434>
-        "arm64ec" => false,
-        // Selection failure <https://github.com/llvm/llvm-project/issues/50374>
-        "s390x" => false,
-        // Infinite recursion <https://github.com/llvm/llvm-project/issues/97981>
-        "csky" => false,
-        "hexagon" => false,
-        "powerpc" | "powerpc64" => false,
-        "sparc" | "sparc64" => false,
-        "wasm32" | "wasm64" => false,
-        // Most everything else works as of LLVM 19
-        _ => true,
-    };
+    // Config shorthands
+    println!("cargo:rustc-check-cfg=cfg(x86_no_sse)");
+    if target.arch == "x86" && !target.features.iter().any(|f| f == "sse") {
+        // Shorthand to detect i586 targets
+        println!("cargo:rustc-cfg=x86_no_sse");
+    }
 
-    let f128_enabled = match target.arch.as_str() {
-        // Unsupported (libcall is not supported) <https://github.com/llvm/llvm-project/issues/121122>
-        "amdgpu" => false,
-        // Unsupported <https://github.com/llvm/llvm-project/issues/94434>
-        "arm64ec" => false,
-        // FIXME(llvm20): fixed by <https://github.com/llvm/llvm-project/pull/117525>
-        "mips64" | "mips64r6" => false,
-        // Selection failure <https://github.com/llvm/llvm-project/issues/95471>
-        "nvptx64" => false,
-        // Selection failure <https://github.com/llvm/llvm-project/issues/101545>
-        "powerpc64" if &target.os == "aix" => false,
-        // Selection failure <https://github.com/llvm/llvm-project/issues/41838>
-        "sparc" => false,
-        // Most everything else works as of LLVM 19
-        _ => true,
-    };
+    /* Not all backends support `f16` and `f128` to the same level on all architectures, so we
+     * need to disable things if the compiler may crash. See configuration at:
+     * * https://github.com/rust-lang/rust/blob/c65dccabacdfd6c8a7f7439eba13422fdd89b91e/compiler/rustc_codegen_llvm/src/llvm_util.rs#L367-L432
+     * * https://github.com/rust-lang/rustc_codegen_gcc/blob/4b5c44b14166083eef8d71f15f5ea1f53fc976a0/src/lib.rs#L496-L507
+     * * https://github.com/rust-lang/rustc_codegen_cranelift/blob/c713ffab3c6e28ab4b4dd4e392330f786ea657ad/src/lib.rs#L196-L226
+     */
 
-    // If the feature is set, disable these types.
-    let disable_both = env::var_os("CARGO_FEATURE_NO_F16_F128").is_some();
+    // If the feature is set, disable both of these types.
+    let no_f16_f128 = target.cargo_features.iter().any(|s| s == "no-f16-f128");
 
     println!("cargo::rustc-check-cfg=cfg(f16_enabled)");
-    println!("cargo::rustc-check-cfg=cfg(f128_enabled)");
-
-    if f16_enabled && !disable_both {
+    if target.reliable_f16 && !no_f16_f128 {
         println!("cargo::rustc-cfg=f16_enabled");
     }
 
-    if f128_enabled && !disable_both {
+    println!("cargo::rustc-check-cfg=cfg(f128_enabled)");
+    if target.reliable_f128 && !no_f16_f128 {
         println!("cargo::rustc-cfg=f128_enabled");
     }
 }

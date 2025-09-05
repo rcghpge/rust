@@ -5,6 +5,7 @@
 #![feature(const_type_name)]
 #![feature(cow_is_borrowed)]
 #![feature(file_buffered)]
+#![feature(gen_blocks)]
 #![feature(if_let_guard)]
 #![feature(impl_trait_in_assoc_type)]
 #![feature(try_blocks)]
@@ -116,7 +117,9 @@ declare_passes! {
     mod add_subtyping_projections : Subtyper;
     mod check_inline : CheckForceInline;
     mod check_call_recursion : CheckCallRecursion, CheckDropRecursion;
+    mod check_inline_always_target_features: CheckInlineAlwaysTargetFeature;
     mod check_alignment : CheckAlignment;
+    mod check_enums : CheckEnums;
     mod check_const_item_mutation : CheckConstItemMutation;
     mod check_null : CheckNull;
     mod check_packed_ref : CheckPackedRef;
@@ -215,7 +218,7 @@ pub fn provide(providers: &mut Providers) {
         optimized_mir,
         is_mir_available,
         is_ctfe_mir_available: is_mir_available,
-        mir_callgraph_reachable: inline::cycle::mir_callgraph_reachable,
+        mir_callgraph_cyclic: inline::cycle::mir_callgraph_cyclic,
         mir_inliner_callees: inline::cycle::mir_inliner_callees,
         promoted_mir,
         deduced_param_attrs: deduce_param_attrs::deduced_param_attrs,
@@ -258,13 +261,13 @@ fn remap_mir_for_const_eval_select<'tcx>(
                             // (const generic stuff) so we just create a temporary and deconstruct
                             // that.
                             let local = body.local_decls.push(LocalDecl::new(ty, fn_span));
-                            bb.statements.push(Statement {
-                                source_info: SourceInfo::outermost(fn_span),
-                                kind: StatementKind::Assign(Box::new((
+                            bb.statements.push(Statement::new(
+                                SourceInfo::outermost(fn_span),
+                                StatementKind::Assign(Box::new((
                                     local.into(),
                                     Rvalue::Use(tupled_args.node.clone()),
                                 ))),
-                            });
+                            ));
                             (Operand::Move, local.into())
                         }
                         Operand::Move(place) => (Operand::Move, place),
@@ -382,6 +385,9 @@ fn mir_built(tcx: TyCtxt<'_>, def: LocalDefId) -> &Steal<Body<'_>> {
             // MIR-level lints.
             &Lint(check_inline::CheckForceInline),
             &Lint(check_call_recursion::CheckCallRecursion),
+            // Check callee's target features match callers target features when
+            // using `#[inline(always)]`
+            &Lint(check_inline_always_target_features::CheckInlineAlwaysTargetFeature),
             &Lint(check_packed_ref::CheckPackedRef),
             &Lint(check_const_item_mutation::CheckConstItemMutation),
             &Lint(function_item_references::FunctionItemReferences),
@@ -666,6 +672,7 @@ pub(crate) fn run_optimization_passes<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'
             // Add some UB checks before any UB gets optimized away.
             &check_alignment::CheckAlignment,
             &check_null::CheckNull,
+            &check_enums::CheckEnums,
             // Before inlining: trim down MIR with passes to reduce inlining work.
 
             // Has to be done before inlining, otherwise actual call will be almost always inlined.

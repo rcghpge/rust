@@ -6,14 +6,17 @@ use std::sync::{Arc, LazyLock, OnceLock};
 use std::{env, fs, iter};
 
 use rustc_ast as ast;
+use rustc_attr_parsing::{AttributeParser, ShouldEmit, validate_attr};
 use rustc_codegen_ssa::traits::CodegenBackend;
 use rustc_data_structures::jobserver::Proxy;
 use rustc_data_structures::steal::Steal;
 use rustc_data_structures::sync::{AppendOnlyIndexVec, FreezeLock, WorkerLocal};
 use rustc_data_structures::{parallel, thousands};
+use rustc_errors::timings::TimingSection;
 use rustc_expand::base::{ExtCtxt, LintStoreExpand};
 use rustc_feature::Features;
 use rustc_fs_util::try_canonicalize;
+use rustc_hir::attrs::AttributeKind;
 use rustc_hir::def_id::{LOCAL_CRATE, StableCrateId, StableCrateIdMap};
 use rustc_hir::definitions::Definitions;
 use rustc_incremental::setup_dep_graph;
@@ -24,11 +27,9 @@ use rustc_middle::arena::Arena;
 use rustc_middle::dep_graph::DepsType;
 use rustc_middle::ty::{self, CurrentGcx, GlobalCtxt, RegisteredTools, TyCtxt};
 use rustc_middle::util::Providers;
-use rustc_parse::{
-    new_parser_from_file, new_parser_from_source_str, unwrap_or_emit_fatal, validate_attr,
-};
+use rustc_parse::{new_parser_from_file, new_parser_from_source_str, unwrap_or_emit_fatal};
 use rustc_passes::{abi_test, input_stats, layout_test};
-use rustc_resolve::Resolver;
+use rustc_resolve::{Resolver, ResolverOutputs};
 use rustc_session::config::{CrateType, Input, OutFileName, OutputFilenames, OutputType};
 use rustc_session::cstore::Untracked;
 use rustc_session::output::{collect_crate_types, filename_for_input};
@@ -40,7 +41,7 @@ use rustc_span::{
     Symbol, sym,
 };
 use rustc_target::spec::PanicStrategy;
-use rustc_trait_selection::traits;
+use rustc_trait_selection::{solve, traits};
 use tracing::{info, instrument};
 
 use crate::interface::Compiler;
@@ -107,7 +108,7 @@ impl LintStoreExpand for LintStoreExpandImpl<'_> {
         registered_tools: &RegisteredTools,
         node_id: ast::NodeId,
         attrs: &[ast::Attribute],
-        items: &[rustc_ast::ptr::P<ast::Item>],
+        items: &[Box<ast::Item>],
         name: Symbol,
     ) {
         pre_expansion_lint(sess, features, self.0, registered_tools, (node_id, attrs, items), name);
@@ -192,7 +193,7 @@ fn configure_and_expand(
         // Create the config for macro expansion
         let recursion_limit = get_recursion_limit(pre_configured_attrs, sess);
         let cfg = rustc_expand::expand::ExpansionConfig {
-            crate_name: crate_name.to_string(),
+            crate_name,
             features,
             recursion_limit,
             trace_mac: sess.opts.unstable_opts.trace_macros,
@@ -206,6 +207,10 @@ fn configure_and_expand(
         ecx.num_standard_library_imports = num_standard_library_imports;
         // Expand macros now!
         let krate = sess.time("expand_crate", || ecx.monotonic_expander().expand_crate(krate));
+
+        if ecx.nb_macro_errors > 0 {
+            sess.dcx().abort_if_errors();
+        }
 
         // The rest is error reporting and stats
 
@@ -297,6 +302,16 @@ fn configure_and_expand(
 fn print_macro_stats(ecx: &ExtCtxt<'_>) {
     use std::fmt::Write;
 
+    let crate_name = ecx.ecfg.crate_name.as_str();
+    let crate_name = if crate_name == "build_script_build" {
+        // This is a build script. Get the package name from the environment.
+        let pkg_name =
+            std::env::var("CARGO_PKG_NAME").unwrap_or_else(|_| "<unknown crate>".to_string());
+        format!("{pkg_name} build script")
+    } else {
+        crate_name.to_string()
+    };
+
     // No instability because we immediately sort the produced vector.
     #[allow(rustc::potential_query_instability)]
     let mut macro_stats: Vec<_> = ecx
@@ -326,7 +341,7 @@ fn print_macro_stats(ecx: &ExtCtxt<'_>) {
     // non-interleaving, though.
     let mut s = String::new();
     _ = writeln!(s, "{prefix} {}", "=".repeat(banner_w));
-    _ = writeln!(s, "{prefix} MACRO EXPANSION STATS: {}", ecx.ecfg.crate_name);
+    _ = writeln!(s, "{prefix} MACRO EXPANSION STATS: {}", crate_name);
     _ = writeln!(
         s,
         "{prefix} {:<name_w$}{:>uses_w$}{:>lines_w$}{:>avg_lines_w$}{:>bytes_w$}{:>avg_bytes_w$}",
@@ -340,23 +355,33 @@ fn print_macro_stats(ecx: &ExtCtxt<'_>) {
     }
     for (bytes, lines, uses, name, kind) in macro_stats {
         let mut name = ExpnKind::Macro(kind, *name).descr();
+        let uses_with_underscores = thousands::usize_with_underscores(uses);
         let avg_lines = lines as f64 / uses as f64;
         let avg_bytes = bytes as f64 / uses as f64;
-        if name.len() >= name_w {
-            // If the name is long, print it on a line by itself, then
-            // set the name to empty and print things normally, to show the
-            // stats on the next line.
+
+        // Ensure the "Macro Name" and "Uses" columns are as compact as possible.
+        let mut uses_w = uses_w;
+        if name.len() + uses_with_underscores.len() >= name_w + uses_w {
+            // The name would abut or overlap the uses value. Print the name
+            // on a line by itself, then set the name to empty and print things
+            // normally, to show the stats on the next line.
             _ = writeln!(s, "{prefix} {:<name_w$}", name);
             name = String::new();
-        }
+        } else if name.len() >= name_w {
+            // The name won't abut or overlap with the uses value, but it does
+            // overlap with the empty part of the uses column. Shrink the width
+            // of the uses column to account for the excess name length.
+            uses_w -= name.len() - name_w;
+        };
+
         _ = writeln!(
             s,
             "{prefix} {:<name_w$}{:>uses_w$}{:>lines_w$}{:>avg_lines_w$}{:>bytes_w$}{:>avg_bytes_w$}",
             name,
-            thousands::usize_with_underscores(uses),
-            thousands::isize_with_underscores(lines),
+            uses_with_underscores,
+            thousands::usize_with_underscores(lines),
             thousands::f64p1_with_underscores(avg_lines),
-            thousands::isize_with_underscores(bytes),
+            thousands::usize_with_underscores(bytes),
             thousands::f64p1_with_underscores(avg_bytes),
         );
     }
@@ -370,7 +395,7 @@ fn early_lint_checks(tcx: TyCtxt<'_>, (): ()) {
     let mut lint_buffer = resolver.lint_buffer.steal();
 
     if sess.opts.unstable_opts.input_stats {
-        input_stats::print_ast_stats(krate, "POST EXPANSION AST STATS", "ast-stats");
+        input_stats::print_ast_stats(tcx, krate);
     }
 
     // Needs to go *after* expansion to be able to check the results of macro expansion.
@@ -768,7 +793,7 @@ fn resolver_for_lowering_raw<'tcx>(
     // Make sure we don't mutate the cstore from here on.
     tcx.untracked().cstore.freeze();
 
-    let ty::ResolverOutputs {
+    let ResolverOutputs {
         global_ctxt: untracked_resolutions,
         ast_lowering: untracked_resolver_for_lowering,
     } = resolver.into_outputs();
@@ -850,8 +875,7 @@ pub static DEFAULT_QUERY_PROVIDERS: LazyLock<Providers> = LazyLock::new(|| {
     providers.analysis = analysis;
     providers.hir_crate = rustc_ast_lowering::lower_to_hir;
     providers.resolver_for_lowering_raw = resolver_for_lowering_raw;
-    providers.stripped_cfg_items =
-        |tcx, _| tcx.arena.alloc_from_iter(tcx.resolutions(()).stripped_cfg_items.steal());
+    providers.stripped_cfg_items = |tcx, _| &tcx.resolutions(()).stripped_cfg_items[..];
     providers.resolutions = |tcx, ()| tcx.resolver_for_lowering_raw(()).1;
     providers.early_lint_checks = early_lint_checks;
     providers.env_var_os = env_var_os;
@@ -871,6 +895,7 @@ pub static DEFAULT_QUERY_PROVIDERS: LazyLock<Providers> = LazyLock::new(|| {
     rustc_hir_typeck::provide(providers);
     ty::provide(providers);
     traits::provide(providers);
+    solve::provide(providers);
     rustc_passes::provide(providers);
     rustc_traits::provide(providers);
     rustc_ty_utils::provide(providers);
@@ -1011,8 +1036,8 @@ fn run_required_analyses(tcx: TyCtxt<'_>) {
 
     // Prefetch this to prevent multiple threads from blocking on it later.
     // This is needed since the `hir_id_validator::check_crate` call above is not guaranteed
-    // to use `hir_crate`.
-    tcx.ensure_done().hir_crate(());
+    // to use `hir_crate_items`.
+    tcx.ensure_done().hir_crate_items(());
 
     let sess = tcx.sess;
     sess.time("misc_checking_1", || {
@@ -1035,17 +1060,11 @@ fn run_required_analyses(tcx: TyCtxt<'_>) {
                 });
             },
             {
-                sess.time("unused_lib_feature_checking", || {
-                    rustc_passes::stability::check_unused_or_stable_features(tcx)
-                });
-            },
-            {
                 // We force these queries to run,
                 // since they might not otherwise get called.
                 // This marks the corresponding crate-level attributes
                 // as used, and ensures that their values are valid.
                 tcx.ensure_ok().limits(());
-                tcx.ensure_ok().stability_index(());
             }
         );
     });
@@ -1063,7 +1082,8 @@ fn run_required_analyses(tcx: TyCtxt<'_>) {
             if !tcx.is_typeck_child(def_id.to_def_id()) {
                 // Child unsafety and borrowck happens together with the parent
                 tcx.ensure_ok().check_unsafety(def_id);
-                tcx.ensure_ok().mir_borrowck(def_id)
+                tcx.ensure_ok().mir_borrowck(def_id);
+                tcx.ensure_ok().check_transmutes(def_id);
             }
             tcx.ensure_ok().has_ffi_unwind_calls(def_id);
 
@@ -1133,7 +1153,9 @@ fn analysis(tcx: TyCtxt<'_>, (): ()) {
 
                 parallel!(
                     {
-                        tcx.ensure_ok().check_private_in_public(());
+                        tcx.par_hir_for_each_module(|module| {
+                            tcx.ensure_ok().check_private_in_public(module)
+                        })
                     },
                     {
                         tcx.par_hir_for_each_module(|module| {
@@ -1176,6 +1198,8 @@ pub(crate) fn start_codegen<'tcx>(
     codegen_backend: &dyn CodegenBackend,
     tcx: TyCtxt<'tcx>,
 ) -> (Box<dyn Any>, EncodedMetadata) {
+    tcx.sess.timings.start_section(tcx.sess.dcx(), TimingSection::Codegen);
+
     // Hook for tests.
     if let Some((def_id, _)) = tcx.entry_fn(())
         && tcx.has_attr(def_id, sym::rustc_delayed_bug_from_inside_query)
@@ -1222,8 +1246,7 @@ pub fn get_crate_name(sess: &Session, krate_attrs: &[ast::Attribute]) -> Symbol 
     // in all code paths that require the crate name very early on, namely before
     // macro expansion.
 
-    let attr_crate_name =
-        validate_and_find_value_str_builtin_attr(sym::crate_name, sess, krate_attrs);
+    let attr_crate_name = parse_crate_name(sess, krate_attrs, ShouldEmit::EarlyFatal);
 
     let validate = |name, span| {
         rustc_session::output::validate_crate_name(sess, name, span);
@@ -1259,6 +1282,28 @@ pub fn get_crate_name(sess: &Session, krate_attrs: &[ast::Attribute]) -> Symbol 
     }
 
     sym::rust_out
+}
+
+pub(crate) fn parse_crate_name(
+    sess: &Session,
+    attrs: &[ast::Attribute],
+    emit_errors: ShouldEmit,
+) -> Option<(Symbol, Span)> {
+    let rustc_hir::Attribute::Parsed(AttributeKind::CrateName { name, name_span, .. }) =
+        AttributeParser::parse_limited_should_emit(
+            sess,
+            &attrs,
+            sym::crate_name,
+            DUMMY_SP,
+            rustc_ast::node_id::CRATE_NODE_ID,
+            None,
+            emit_errors,
+        )?
+    else {
+        unreachable!("crate_name is the only attr we could've parsed here");
+    };
+
+    Some((name, name_span))
 }
 
 fn get_recursion_limit(krate_attrs: &[ast::Attribute], sess: &Session) -> Limit {

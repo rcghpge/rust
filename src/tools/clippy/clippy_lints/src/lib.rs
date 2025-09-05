@@ -7,7 +7,7 @@
 #![feature(iter_intersperse)]
 #![feature(iter_partition_in_place)]
 #![feature(never_type)]
-#![feature(round_char_boundary)]
+#![cfg_attr(bootstrap, feature(round_char_boundary))]
 #![feature(rustc_private)]
 #![feature(stmt_expr_attributes)]
 #![feature(unwrap_infallible)]
@@ -35,7 +35,6 @@ extern crate rustc_abi;
 extern crate rustc_arena;
 extern crate rustc_ast;
 extern crate rustc_ast_pretty;
-extern crate rustc_attr_data_structures;
 extern crate rustc_data_structures;
 extern crate rustc_driver;
 extern crate rustc_errors;
@@ -59,10 +58,10 @@ extern crate smallvec;
 extern crate thin_vec;
 
 #[macro_use]
-mod declare_clippy_lint;
+extern crate clippy_utils;
 
 #[macro_use]
-extern crate clippy_utils;
+extern crate declare_clippy_lint;
 
 mod utils;
 
@@ -411,107 +410,8 @@ mod zombie_processes;
 use clippy_config::{Conf, get_configuration_metadata, sanitize_explanation};
 use clippy_utils::macros::FormatArgsStorage;
 use rustc_data_structures::fx::FxHashSet;
-use rustc_lint::{Lint, LintId};
+use rustc_lint::Lint;
 use utils::attr_collector::{AttrCollector, AttrStorage};
-
-#[derive(Default)]
-struct RegistrationGroups {
-    all: Vec<LintId>,
-    cargo: Vec<LintId>,
-    complexity: Vec<LintId>,
-    correctness: Vec<LintId>,
-    nursery: Vec<LintId>,
-    pedantic: Vec<LintId>,
-    perf: Vec<LintId>,
-    restriction: Vec<LintId>,
-    style: Vec<LintId>,
-    suspicious: Vec<LintId>,
-}
-
-impl RegistrationGroups {
-    #[rustfmt::skip]
-    fn register(self, store: &mut rustc_lint::LintStore) {
-        store.register_group(true, "clippy::all", Some("clippy_all"), self.all);
-        store.register_group(true, "clippy::cargo", Some("clippy_cargo"), self.cargo);
-        store.register_group(true, "clippy::complexity", Some("clippy_complexity"), self.complexity);
-        store.register_group(true, "clippy::correctness", Some("clippy_correctness"), self.correctness);
-        store.register_group(true, "clippy::nursery", Some("clippy_nursery"), self.nursery);
-        store.register_group(true, "clippy::pedantic", Some("clippy_pedantic"), self.pedantic);
-        store.register_group(true, "clippy::perf", Some("clippy_perf"), self.perf);
-        store.register_group(true, "clippy::restriction", Some("clippy_restriction"), self.restriction);
-        store.register_group(true, "clippy::style", Some("clippy_style"), self.style);
-        store.register_group(true, "clippy::suspicious", Some("clippy_suspicious"), self.suspicious);
-    }
-}
-
-#[derive(Copy, Clone, Debug)]
-pub(crate) enum LintCategory {
-    Cargo,
-    Complexity,
-    Correctness,
-    Nursery,
-    Pedantic,
-    Perf,
-    Restriction,
-    Style,
-    Suspicious,
-}
-
-#[allow(clippy::enum_glob_use)]
-use LintCategory::*;
-
-impl LintCategory {
-    fn is_all(self) -> bool {
-        matches!(self, Correctness | Suspicious | Style | Complexity | Perf)
-    }
-
-    fn group(self, groups: &mut RegistrationGroups) -> &mut Vec<LintId> {
-        match self {
-            Cargo => &mut groups.cargo,
-            Complexity => &mut groups.complexity,
-            Correctness => &mut groups.correctness,
-            Nursery => &mut groups.nursery,
-            Pedantic => &mut groups.pedantic,
-            Perf => &mut groups.perf,
-            Restriction => &mut groups.restriction,
-            Style => &mut groups.style,
-            Suspicious => &mut groups.suspicious,
-        }
-    }
-}
-
-pub struct LintInfo {
-    /// Double reference to maintain pointer equality
-    pub lint: &'static &'static Lint,
-    category: LintCategory,
-    pub explanation: &'static str,
-    /// e.g. `clippy_lints/src/absolute_paths.rs#43`
-    pub location: &'static str,
-    pub version: Option<&'static str>,
-}
-
-impl LintInfo {
-    /// Returns the lint name in lowercase without the `clippy::` prefix
-    #[allow(clippy::missing_panics_doc)]
-    pub fn name_lower(&self) -> String {
-        self.lint.name.strip_prefix("clippy::").unwrap().to_ascii_lowercase()
-    }
-
-    /// Returns the name of the lint's category in lowercase (`style`, `pedantic`)
-    pub fn category_str(&self) -> &'static str {
-        match self.category {
-            Cargo => "cargo",
-            Complexity => "complexity",
-            Correctness => "correctness",
-            Nursery => "nursery",
-            Pedantic => "pedantic",
-            Perf => "perf",
-            Restriction => "restriction",
-            Style => "style",
-            Suspicious => "suspicious",
-        }
-    }
-}
 
 pub fn explain(name: &str) -> i32 {
     let target = format!("clippy::{}", name.to_ascii_uppercase());
@@ -535,30 +435,11 @@ pub fn explain(name: &str) -> i32 {
     }
 }
 
-fn register_categories(store: &mut rustc_lint::LintStore) {
-    let mut groups = RegistrationGroups::default();
-
-    for LintInfo { lint, category, .. } in declared_lints::LINTS {
-        if category.is_all() {
-            groups.all.push(LintId::of(lint));
-        }
-
-        category.group(&mut groups).push(LintId::of(lint));
-    }
-
-    let lints: Vec<&'static Lint> = declared_lints::LINTS.iter().map(|info| *info.lint).collect();
-
-    store.register_lints(&lints);
-    groups.register(store);
-}
-
 /// Register all lints and lint groups with the rustc lint store
 ///
 /// Used in `./src/driver.rs`.
 #[expect(clippy::too_many_lines)]
-pub fn register_lints(store: &mut rustc_lint::LintStore, conf: &'static Conf) {
-    register_categories(store);
-
+pub fn register_lint_passes(store: &mut rustc_lint::LintStore, conf: &'static Conf) {
     for (old_name, new_name) in deprecated_lints::RENAMED {
         store.register_renamed(old_name, new_name);
     }
@@ -641,7 +522,8 @@ pub fn register_lints(store: &mut rustc_lint::LintStore, conf: &'static Conf) {
     store.register_late_pass(|_| Box::new(same_name_method::SameNameMethod));
     store.register_late_pass(move |_| Box::new(index_refutable_slice::IndexRefutableSlice::new(conf)));
     store.register_late_pass(|_| Box::<shadow::Shadow>::default());
-    store.register_late_pass(|_| Box::new(unit_types::UnitTypes));
+    let format_args = format_args_storage.clone();
+    store.register_late_pass(move |_| Box::new(unit_types::UnitTypes::new(format_args.clone())));
     store.register_late_pass(move |_| Box::new(loops::Loops::new(conf)));
     store.register_late_pass(|_| Box::<main_recursion::MainRecursion>::default());
     store.register_late_pass(move |_| Box::new(lifetimes::Lifetimes::new(conf)));
@@ -674,6 +556,7 @@ pub fn register_lints(store: &mut rustc_lint::LintStore, conf: &'static Conf) {
     store.register_late_pass(|_| Box::new(panicking_overflow_checks::PanickingOverflowChecks));
     store.register_late_pass(|_| Box::<new_without_default::NewWithoutDefault>::default());
     store.register_late_pass(move |_| Box::new(disallowed_names::DisallowedNames::new(conf)));
+    store.register_early_pass(|| Box::new(functions::EarlyFunctions));
     store.register_late_pass(move |tcx| Box::new(functions::Functions::new(tcx, conf)));
     store.register_late_pass(move |_| Box::new(doc::Documentation::new(conf)));
     store.register_early_pass(move || Box::new(doc::Documentation::new(conf)));
@@ -718,7 +601,7 @@ pub fn register_lints(store: &mut rustc_lint::LintStore, conf: &'static Conf) {
     store.register_late_pass(move |_| Box::new(trait_bounds::TraitBounds::new(conf)));
     store.register_late_pass(|_| Box::new(comparison_chain::ComparisonChain));
     store.register_late_pass(move |tcx| Box::new(mut_key::MutableKeyType::new(tcx, conf)));
-    store.register_early_pass(|| Box::new(reference::DerefAddrOf));
+    store.register_late_pass(|_| Box::new(reference::DerefAddrOf));
     store.register_early_pass(|| Box::new(double_parens::DoubleParens));
     let format_args = format_args_storage.clone();
     store.register_late_pass(move |_| Box::new(format_impl::FormatImpl::new(format_args.clone())));
@@ -782,7 +665,6 @@ pub fn register_lints(store: &mut rustc_lint::LintStore, conf: &'static Conf) {
     store.register_early_pass(|| Box::new(asm_syntax::InlineAsmX86IntelSyntax));
     store.register_late_pass(|_| Box::new(empty_drop::EmptyDrop));
     store.register_late_pass(|_| Box::new(strings::StrToString));
-    store.register_late_pass(|_| Box::new(strings::StringToString));
     store.register_late_pass(|_| Box::new(zero_sized_map_values::ZeroSizedMapValues));
     store.register_late_pass(|_| Box::<vec_init_then_push::VecInitThenPush>::default());
     store.register_late_pass(|_| Box::new(redundant_slicing::RedundantSlicing));
@@ -915,7 +797,7 @@ pub fn register_lints(store: &mut rustc_lint::LintStore, conf: &'static Conf) {
     store.register_late_pass(|_| Box::<unconditional_recursion::UnconditionalRecursion>::default());
     store.register_late_pass(move |_| Box::new(pub_underscore_fields::PubUnderscoreFields::new(conf)));
     store.register_late_pass(move |_| Box::new(missing_const_for_thread_local::MissingConstForThreadLocal::new(conf)));
-    store.register_late_pass(move |_| Box::new(incompatible_msrv::IncompatibleMsrv::new(conf)));
+    store.register_late_pass(move |tcx| Box::new(incompatible_msrv::IncompatibleMsrv::new(tcx, conf)));
     store.register_late_pass(|_| Box::new(to_string_trait_impl::ToStringTraitImpl));
     store.register_early_pass(|| Box::new(multiple_bound_locations::MultipleBoundLocations));
     store.register_late_pass(move |_| Box::new(assigning_clones::AssigningClones::new(conf)));

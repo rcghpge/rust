@@ -1,10 +1,6 @@
-use rustc_attr_data_structures::AttributeKind;
 use rustc_span::hygiene::Transparency;
-use rustc_span::{Symbol, sym};
 
-use super::{AttributeOrder, OnDuplicate, SingleAttributeParser};
-use crate::context::{AcceptContext, Stage};
-use crate::parser::ArgParser;
+use super::prelude::*;
 
 pub(crate) struct TransparencyParser;
 
@@ -13,18 +9,28 @@ pub(crate) struct TransparencyParser;
 #[allow(rustc::diagnostic_outside_of_impl)]
 impl<S: Stage> SingleAttributeParser<S> for TransparencyParser {
     const PATH: &[Symbol] = &[sym::rustc_macro_transparency];
-    const ATTRIBUTE_ORDER: AttributeOrder = AttributeOrder::KeepFirst;
+    const ATTRIBUTE_ORDER: AttributeOrder = AttributeOrder::KeepInnermost;
     const ON_DUPLICATE: OnDuplicate<S> = OnDuplicate::Custom(|cx, used, unused| {
         cx.dcx().span_err(vec![used, unused], "multiple macro transparency attributes");
     });
+    const ALLOWED_TARGETS: AllowedTargets = AllowedTargets::AllowList(&[Allow(Target::MacroDef)]);
+    const TEMPLATE: AttributeTemplate =
+        template!(NameValueStr: ["transparent", "semitransparent", "opaque"]);
 
     fn convert(cx: &mut AcceptContext<'_, '_, S>, args: &ArgParser<'_>) -> Option<AttributeKind> {
-        match args.name_value().and_then(|nv| nv.value_as_str()) {
+        let Some(nv) = args.name_value() else {
+            cx.expected_name_value(cx.attr_span, None);
+            return None;
+        };
+        match nv.value_as_str() {
             Some(sym::transparent) => Some(Transparency::Transparent),
             Some(sym::semiopaque | sym::semitransparent) => Some(Transparency::SemiOpaque),
             Some(sym::opaque) => Some(Transparency::Opaque),
-            Some(other) => {
-                cx.dcx().span_err(cx.attr_span, format!("unknown macro transparency: `{other}`"));
+            Some(_) => {
+                cx.expected_specific_argument_strings(
+                    nv.value_span,
+                    &[sym::transparent, sym::semitransparent, sym::opaque],
+                );
                 None
             }
             None => None,

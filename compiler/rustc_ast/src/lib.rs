@@ -16,10 +16,7 @@
 #![feature(box_patterns)]
 #![feature(if_let_guard)]
 #![feature(macro_metavar_expr)]
-#![feature(negative_impls)]
-#![feature(never_type)]
 #![feature(rustdoc_internals)]
-#![feature(stmt_expr_attributes)]
 #![recursion_limit = "256"]
 // tidy-alphabetical-end
 
@@ -40,7 +37,6 @@ pub mod expand;
 pub mod format;
 pub mod mut_visit;
 pub mod node_id;
-pub mod ptr;
 pub mod token;
 pub mod tokenstream;
 pub mod visit;

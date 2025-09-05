@@ -5,9 +5,10 @@ use std::ops::Bound;
 use rustc_ast::AsmMacro;
 use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_errors::DiagArgValue;
+use rustc_hir::attrs::AttributeKind;
 use rustc_hir::def::DefKind;
-use rustc_hir::{self as hir, BindingMode, ByRef, HirId, Mutability};
-use rustc_middle::middle::codegen_fn_attrs::TargetFeature;
+use rustc_hir::{self as hir, BindingMode, ByRef, HirId, Mutability, find_attr};
+use rustc_middle::middle::codegen_fn_attrs::{TargetFeature, TargetFeatureKind};
 use rustc_middle::mir::BorrowKind;
 use rustc_middle::span_bug;
 use rustc_middle::thir::visit::Visitor;
@@ -465,10 +466,12 @@ impl<'a, 'tcx> Visitor<'a, 'tcx> for UnsafetyVisitor<'a, 'tcx> {
             | ExprKind::Break { .. }
             | ExprKind::Closure { .. }
             | ExprKind::Continue { .. }
+            | ExprKind::ConstContinue { .. }
             | ExprKind::Return { .. }
             | ExprKind::Become { .. }
             | ExprKind::Yield { .. }
             | ExprKind::Loop { .. }
+            | ExprKind::LoopMatch { .. }
             | ExprKind::Let { .. }
             | ExprKind::Match { .. }
             | ExprKind::Box { .. }
@@ -519,7 +522,7 @@ impl<'a, 'tcx> Visitor<'a, 'tcx> for UnsafetyVisitor<'a, 'tcx> {
                             .iter()
                             .copied()
                             .filter(|feature| {
-                                !feature.implied
+                                feature.kind == TargetFeatureKind::Enabled
                                     && !self
                                         .body_target_features
                                         .iter()
@@ -1155,7 +1158,7 @@ pub(crate) fn check_unsafety(tcx: TyCtxt<'_>, def: LocalDefId) {
     // Closures and inline consts are handled by their owner, if it has a body
     assert!(!tcx.is_typeck_child(def.to_def_id()));
     // Also, don't safety check custom MIR
-    if tcx.has_attr(def, sym::custom_mir) {
+    if find_attr!(tcx.get_all_attrs(def), AttributeKind::CustomMir(..) => ()).is_some() {
         return;
     }
 

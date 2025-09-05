@@ -5,6 +5,7 @@ use std::path::Path;
 use rustc_abi::{Align, AlignFromBytesError, CanonAbi, Size};
 use rustc_apfloat::Float;
 use rustc_ast::expand::allocator::alloc_error_handler_name;
+use rustc_hir::attrs::Linkage;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::CrateNum;
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
@@ -138,7 +139,13 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
             Entry::Occupied(e) => e.into_mut(),
             Entry::Vacant(e) => {
                 // Find it if it was not cached.
-                let mut instance_and_crate: Option<(ty::Instance<'_>, CrateNum)> = None;
+
+                struct SymbolTarget<'tcx> {
+                    instance: ty::Instance<'tcx>,
+                    cnum: CrateNum,
+                    is_weak: bool,
+                }
+                let mut symbol_target: Option<SymbolTarget<'tcx>> = None;
                 helpers::iter_exported_symbols(tcx, |cnum, def_id| {
                     let attrs = tcx.codegen_fn_attrs(def_id);
                     // Skip over imports of items.
@@ -146,7 +153,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                         return interp_ok(());
                     }
                     // Skip over items without an explicitly defined symbol name.
-                    if !(attrs.export_name.is_some()
+                    if !(attrs.symbol_name.is_some()
                         || attrs.flags.contains(CodegenFnAttrFlags::NO_MANGLE)
                         || attrs.flags.contains(CodegenFnAttrFlags::RUSTC_STD_INTERNAL_SYMBOL))
                     {
@@ -155,40 +162,80 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
 
                     let instance = Instance::mono(tcx, def_id);
                     let symbol_name = tcx.symbol_name(instance).name;
+                    let is_weak = attrs.linkage == Some(Linkage::WeakAny);
                     if symbol_name == link_name.as_str() {
-                        if let Some((original_instance, original_cnum)) = instance_and_crate {
-                            // Make sure we are consistent wrt what is 'first' and 'second'.
-                            let original_span = tcx.def_span(original_instance.def_id()).data();
-                            let span = tcx.def_span(def_id).data();
-                            if original_span < span {
-                                throw_machine_stop!(TerminationInfo::MultipleSymbolDefinitions {
-                                    link_name,
-                                    first: original_span,
-                                    first_crate: tcx.crate_name(original_cnum),
-                                    second: span,
-                                    second_crate: tcx.crate_name(cnum),
-                                });
-                            } else {
-                                throw_machine_stop!(TerminationInfo::MultipleSymbolDefinitions {
-                                    link_name,
-                                    first: span,
-                                    first_crate: tcx.crate_name(cnum),
-                                    second: original_span,
-                                    second_crate: tcx.crate_name(original_cnum),
-                                });
+                        if let Some(original) = &symbol_target {
+                            // There is more than one definition with this name. What we do now
+                            // depends on whether one or both definitions are weak.
+                            match (is_weak, original.is_weak) {
+                                (false, true) => {
+                                    // Original definition is a weak definition. Override it.
+
+                                    symbol_target = Some(SymbolTarget {
+                                        instance: ty::Instance::mono(tcx, def_id),
+                                        cnum,
+                                        is_weak,
+                                    });
+                                }
+                                (true, false) => {
+                                    // Current definition is a weak definition. Keep the original one.
+                                }
+                                (true, true) | (false, false) => {
+                                    // Either both definitions are non-weak or both are weak. In
+                                    // either case return an error. For weak definitions we error
+                                    // because it is unspecified which definition would have been
+                                    // picked by the linker.
+
+                                    // Make sure we are consistent wrt what is 'first' and 'second'.
+                                    let original_span =
+                                        tcx.def_span(original.instance.def_id()).data();
+                                    let span = tcx.def_span(def_id).data();
+                                    if original_span < span {
+                                        throw_machine_stop!(
+                                            TerminationInfo::MultipleSymbolDefinitions {
+                                                link_name,
+                                                first: original_span,
+                                                first_crate: tcx.crate_name(original.cnum),
+                                                second: span,
+                                                second_crate: tcx.crate_name(cnum),
+                                            }
+                                        );
+                                    } else {
+                                        throw_machine_stop!(
+                                            TerminationInfo::MultipleSymbolDefinitions {
+                                                link_name,
+                                                first: span,
+                                                first_crate: tcx.crate_name(cnum),
+                                                second: original_span,
+                                                second_crate: tcx.crate_name(original.cnum),
+                                            }
+                                        );
+                                    }
+                                }
                             }
+                        } else {
+                            symbol_target = Some(SymbolTarget {
+                                instance: ty::Instance::mono(tcx, def_id),
+                                cnum,
+                                is_weak,
+                            });
                         }
-                        if !matches!(tcx.def_kind(def_id), DefKind::Fn | DefKind::AssocFn) {
-                            throw_ub_format!(
-                                "attempt to call an exported symbol that is not defined as a function"
-                            );
-                        }
-                        instance_and_crate = Some((ty::Instance::mono(tcx, def_id), cnum));
                     }
                     interp_ok(())
                 })?;
 
-                e.insert(instance_and_crate.map(|ic| ic.0))
+                // Once we identified the instance corresponding to the symbol, ensure
+                // it is a function. It is okay to encounter non-functions in the search above
+                // as long as the final instance we arrive at is a function.
+                if let Some(SymbolTarget { instance, .. }) = symbol_target {
+                    if !matches!(tcx.def_kind(instance.def_id()), DefKind::Fn | DefKind::AssocFn) {
+                        throw_ub_format!(
+                            "attempt to call an exported symbol that is not defined as a function"
+                        );
+                    }
+                }
+
+                e.insert(symbol_target.map(|SymbolTarget { instance, .. }| instance))
             }
         };
         match instance {
@@ -237,7 +284,7 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
         let this = self.eval_context_mut();
 
         // First deal with any external C functions in linked .so file.
-        #[cfg(unix)]
+        #[cfg(all(unix, feature = "native-lib"))]
         if !this.machine.native_lib.is_empty() {
             use crate::shims::native_lib::EvalContextExt as _;
             // An Ok(false) here means that the function being called was not exported
@@ -288,16 +335,17 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
         match link_name.as_str() {
             // Miri-specific extern functions
             "miri_start_unwind" => {
-                let [payload] = this.check_shim(abi, CanonAbi::Rust, link_name, args)?;
+                let [payload] =
+                    this.check_shim_sig_lenient(abi, CanonAbi::Rust, link_name, args)?;
                 this.handle_miri_start_unwind(payload)?;
                 return interp_ok(EmulateItemResult::NeedsUnwind);
             }
             "miri_run_provenance_gc" => {
-                let [] = this.check_shim(abi, CanonAbi::Rust, link_name, args)?;
+                let [] = this.check_shim_sig_lenient(abi, CanonAbi::Rust, link_name, args)?;
                 this.run_provenance_gc();
             }
             "miri_get_alloc_id" => {
-                let [ptr] = this.check_shim(abi, CanonAbi::Rust, link_name, args)?;
+                let [ptr] = this.check_shim_sig_lenient(abi, CanonAbi::Rust, link_name, args)?;
                 let ptr = this.read_pointer(ptr)?;
                 let (alloc_id, _, _) = this.ptr_get_alloc_id(ptr, 0).map_err_kind(|_e| {
                     err_machine_stop!(TerminationInfo::Abort(format!(
@@ -307,7 +355,8 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 this.write_scalar(Scalar::from_u64(alloc_id.0.get()), dest)?;
             }
             "miri_print_borrow_state" => {
-                let [id, show_unnamed] = this.check_shim(abi, CanonAbi::Rust, link_name, args)?;
+                let [id, show_unnamed] =
+                    this.check_shim_sig_lenient(abi, CanonAbi::Rust, link_name, args)?;
                 let id = this.read_scalar(id)?.to_u64()?;
                 let show_unnamed = this.read_scalar(show_unnamed)?.to_bool()?;
                 if let Some(id) = std::num::NonZero::new(id).map(AllocId)
@@ -322,7 +371,7 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 // This associates a name to a tag. Very useful for debugging, and also makes
                 // tests more strict.
                 let [ptr, nth_parent, name] =
-                    this.check_shim(abi, CanonAbi::Rust, link_name, args)?;
+                    this.check_shim_sig_lenient(abi, CanonAbi::Rust, link_name, args)?;
                 let ptr = this.read_pointer(ptr)?;
                 let nth_parent = this.read_scalar(nth_parent)?.to_u8()?;
                 let name = this.read_immediate(name)?;
@@ -335,7 +384,7 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 this.give_pointer_debug_name(ptr, nth_parent, &name)?;
             }
             "miri_static_root" => {
-                let [ptr] = this.check_shim(abi, CanonAbi::Rust, link_name, args)?;
+                let [ptr] = this.check_shim_sig_lenient(abi, CanonAbi::Rust, link_name, args)?;
                 let ptr = this.read_pointer(ptr)?;
                 let (alloc_id, offset, _) = this.ptr_get_alloc_id(ptr, 0)?;
                 if offset != Size::ZERO {
@@ -346,7 +395,8 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 this.machine.static_roots.push(alloc_id);
             }
             "miri_host_to_target_path" => {
-                let [ptr, out, out_size] = this.check_shim(abi, CanonAbi::Rust, link_name, args)?;
+                let [ptr, out, out_size] =
+                    this.check_shim_sig_lenient(abi, CanonAbi::Rust, link_name, args)?;
                 let ptr = this.read_pointer(ptr)?;
                 let out = this.read_pointer(out)?;
                 let out_size = this.read_scalar(out_size)?.to_target_usize(this)?;
@@ -382,7 +432,7 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
             // Writes some bytes to the interpreter's stdout/stderr. See the
             // README for details.
             "miri_write_to_stdout" | "miri_write_to_stderr" => {
-                let [msg] = this.check_shim(abi, CanonAbi::Rust, link_name, args)?;
+                let [msg] = this.check_shim_sig_lenient(abi, CanonAbi::Rust, link_name, args)?;
                 let msg = this.read_immediate(msg)?;
                 let msg = this.read_byte_slice(&msg)?;
                 // Note: we're ignoring errors writing to host stdout/stderr.
@@ -396,7 +446,8 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
             "miri_promise_symbolic_alignment" => {
                 use rustc_abi::AlignFromBytesError;
 
-                let [ptr, align] = this.check_shim(abi, CanonAbi::Rust, link_name, args)?;
+                let [ptr, align] =
+                    this.check_shim_sig_lenient(abi, CanonAbi::Rust, link_name, args)?;
                 let ptr = this.read_pointer(ptr)?;
                 let align = this.read_target_usize(align)?;
                 if !align.is_power_of_two() {
@@ -411,7 +462,7 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
                         AlignFromBytesError::TooLarge(_) => Align::MAX,
                     }
                 });
-                let (_, addr) = ptr.into_parts(); // we know the offset is absolute
+                let addr = ptr.addr();
                 // Cannot panic since `align` is a power of 2 and hence non-zero.
                 if addr.bytes().strict_rem(align.bytes()) != 0 {
                     throw_unsup_format!(
@@ -437,12 +488,12 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
 
             // Aborting the process.
             "exit" => {
-                let [code] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
+                let [code] = this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
                 let code = this.read_scalar(code)?.to_i32()?;
                 throw_machine_stop!(TerminationInfo::Exit { code, leak_check: false });
             }
             "abort" => {
-                let [] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
+                let [] = this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
                 throw_machine_stop!(TerminationInfo::Abort(
                     "the program aborted execution".to_owned()
                 ))
@@ -450,7 +501,7 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
 
             // Standard C allocation
             "malloc" => {
-                let [size] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
+                let [size] = this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
                 let size = this.read_target_usize(size)?;
                 if size <= this.max_size_of_val().bytes() {
                     let res = this.malloc(size, AllocInit::Uninit)?;
@@ -464,7 +515,8 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 }
             }
             "calloc" => {
-                let [items, elem_size] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
+                let [items, elem_size] =
+                    this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
                 let items = this.read_target_usize(items)?;
                 let elem_size = this.read_target_usize(elem_size)?;
                 if let Some(size) = this.compute_size_in_bytes(Size::from_bytes(elem_size), items) {
@@ -479,12 +531,13 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 }
             }
             "free" => {
-                let [ptr] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
+                let [ptr] = this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
                 let ptr = this.read_pointer(ptr)?;
                 this.free(ptr)?;
             }
             "realloc" => {
-                let [old_ptr, new_size] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
+                let [old_ptr, new_size] =
+                    this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
                 let old_ptr = this.read_pointer(old_ptr)?;
                 let new_size = this.read_target_usize(new_size)?;
                 if new_size <= this.max_size_of_val().bytes() {
@@ -504,7 +557,8 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 let default = |ecx: &mut MiriInterpCx<'tcx>| {
                     // Only call `check_shim` when `#[global_allocator]` isn't used. When that
                     // macro is used, we act like no shim exists, so that the exported function can run.
-                    let [size, align] = ecx.check_shim(abi, CanonAbi::Rust, link_name, args)?;
+                    let [size, align] =
+                        ecx.check_shim_sig_lenient(abi, CanonAbi::Rust, link_name, args)?;
                     let size = ecx.read_target_usize(size)?;
                     let align = ecx.read_target_usize(align)?;
 
@@ -537,7 +591,8 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 return this.emulate_allocator(|this| {
                     // See the comment for `__rust_alloc` why `check_shim` is only called in the
                     // default case.
-                    let [size, align] = this.check_shim(abi, CanonAbi::Rust, link_name, args)?;
+                    let [size, align] =
+                        this.check_shim_sig_lenient(abi, CanonAbi::Rust, link_name, args)?;
                     let size = this.read_target_usize(size)?;
                     let align = this.read_target_usize(align)?;
 
@@ -559,7 +614,7 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
                     // See the comment for `__rust_alloc` why `check_shim` is only called in the
                     // default case.
                     let [ptr, old_size, align] =
-                        ecx.check_shim(abi, CanonAbi::Rust, link_name, args)?;
+                        ecx.check_shim_sig_lenient(abi, CanonAbi::Rust, link_name, args)?;
                     let ptr = ecx.read_pointer(ptr)?;
                     let old_size = ecx.read_target_usize(old_size)?;
                     let align = ecx.read_target_usize(align)?;
@@ -590,7 +645,7 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
                     // See the comment for `__rust_alloc` why `check_shim` is only called in the
                     // default case.
                     let [ptr, old_size, align, new_size] =
-                        this.check_shim(abi, CanonAbi::Rust, link_name, args)?;
+                        this.check_shim_sig_lenient(abi, CanonAbi::Rust, link_name, args)?;
                     let ptr = this.read_pointer(ptr)?;
                     let old_size = this.read_target_usize(old_size)?;
                     let align = this.read_target_usize(align)?;
@@ -611,10 +666,23 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
                     this.write_pointer(new_ptr, dest)
                 });
             }
+            name if name == this.mangle_internal_symbol("__rust_no_alloc_shim_is_unstable_v2") => {
+                // This is a no-op shim that only exists to prevent making the allocator shims instantly stable.
+                let [] = this.check_shim_sig_lenient(abi, CanonAbi::Rust, link_name, args)?;
+            }
+            name if name
+                == this.mangle_internal_symbol("__rust_alloc_error_handler_should_panic_v2") =>
+            {
+                // Gets the value of the `oom` option.
+                let [] = this.check_shim_sig_lenient(abi, CanonAbi::Rust, link_name, args)?;
+                let val = this.tcx.sess.opts.unstable_opts.oom.should_panic();
+                this.write_int(val, dest)?;
+            }
 
             // C memory handling functions
             "memcmp" => {
-                let [left, right, n] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
+                let [left, right, n] =
+                    this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
                 let left = this.read_pointer(left)?;
                 let right = this.read_pointer(right)?;
                 let n = Size::from_bytes(this.read_target_usize(n)?);
@@ -638,7 +706,8 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 this.write_scalar(Scalar::from_i32(result), dest)?;
             }
             "memrchr" => {
-                let [ptr, val, num] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
+                let [ptr, val, num] =
+                    this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
                 let ptr = this.read_pointer(ptr)?;
                 let val = this.read_scalar(val)?.to_i32()?;
                 let num = this.read_target_usize(num)?;
@@ -664,7 +733,8 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 }
             }
             "memchr" => {
-                let [ptr, val, num] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
+                let [ptr, val, num] =
+                    this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
                 let ptr = this.read_pointer(ptr)?;
                 let val = this.read_scalar(val)?.to_i32()?;
                 let num = this.read_target_usize(num)?;
@@ -687,7 +757,7 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 }
             }
             "strlen" => {
-                let [ptr] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
+                let [ptr] = this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
                 let ptr = this.read_pointer(ptr)?;
                 // This reads at least 1 byte, so we are already enforcing that this is a valid pointer.
                 let n = this.read_c_str(ptr)?.len();
@@ -697,7 +767,7 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 )?;
             }
             "wcslen" => {
-                let [ptr] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
+                let [ptr] = this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
                 let ptr = this.read_pointer(ptr)?;
                 // This reads at least 1 byte, so we are already enforcing that this is a valid pointer.
                 let n = this.read_wchar_t_str(ptr)?.len();
@@ -707,7 +777,8 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 )?;
             }
             "memcpy" => {
-                let [ptr_dest, ptr_src, n] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
+                let [ptr_dest, ptr_src, n] =
+                    this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
                 let ptr_dest = this.read_pointer(ptr_dest)?;
                 let ptr_src = this.read_pointer(ptr_src)?;
                 let n = this.read_target_usize(n)?;
@@ -721,7 +792,8 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 this.write_pointer(ptr_dest, dest)?;
             }
             "strcpy" => {
-                let [ptr_dest, ptr_src] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
+                let [ptr_dest, ptr_src] =
+                    this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
                 let ptr_dest = this.read_pointer(ptr_dest)?;
                 let ptr_src = this.read_pointer(ptr_src)?;
 
@@ -752,7 +824,7 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
             | "erff"
             | "erfcf"
             => {
-                let [f] = this.check_shim(abi, CanonAbi::C , link_name, args)?;
+                let [f] = this.check_shim_sig_lenient(abi, CanonAbi::C , link_name, args)?;
                 let f = this.read_scalar(f)?.to_f32()?;
                 // Using host floats (but it's fine, these operations do not have guaranteed precision).
                 let f_host = f.to_host();
@@ -790,7 +862,7 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
             | "atan2f"
             | "fdimf"
             => {
-                let [f1, f2] = this.check_shim(abi, CanonAbi::C , link_name, args)?;
+                let [f1, f2] = this.check_shim_sig_lenient(abi, CanonAbi::C , link_name, args)?;
                 let f1 = this.read_scalar(f1)?.to_f32()?;
                 let f2 = this.read_scalar(f2)?.to_f32()?;
                 // underscore case for windows, here and below
@@ -829,7 +901,7 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
             | "erf"
             | "erfc"
             => {
-                let [f] = this.check_shim(abi, CanonAbi::C , link_name, args)?;
+                let [f] = this.check_shim_sig_lenient(abi, CanonAbi::C , link_name, args)?;
                 let f = this.read_scalar(f)?.to_f64()?;
                 // Using host floats (but it's fine, these operations do not have guaranteed precision).
                 let f_host = f.to_host();
@@ -867,7 +939,7 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
             | "atan2"
             | "fdim"
             => {
-                let [f1, f2] = this.check_shim(abi, CanonAbi::C , link_name, args)?;
+                let [f1, f2] = this.check_shim_sig_lenient(abi, CanonAbi::C , link_name, args)?;
                 let f1 = this.read_scalar(f1)?.to_f64()?;
                 let f2 = this.read_scalar(f2)?.to_f64()?;
                 // underscore case for windows, here and below
@@ -896,7 +968,7 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
             | "ldexp"
             | "scalbn"
             => {
-                let [x, exp] = this.check_shim(abi, CanonAbi::C , link_name, args)?;
+                let [x, exp] = this.check_shim_sig_lenient(abi, CanonAbi::C , link_name, args)?;
                 // For radix-2 (binary) systems, `ldexp` and `scalbn` are the same.
                 let x = this.read_scalar(x)?.to_f64()?;
                 let exp = this.read_scalar(exp)?.to_i32()?;
@@ -906,7 +978,7 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 this.write_scalar(res, dest)?;
             }
             "lgammaf_r" => {
-                let [x, signp] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
+                let [x, signp] = this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
                 let x = this.read_scalar(x)?.to_f32()?;
                 let signp = this.deref_pointer_as(signp, this.machine.layouts.i32)?;
 
@@ -922,7 +994,7 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 this.write_scalar(res, dest)?;
             }
             "lgamma_r" => {
-                let [x, signp] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
+                let [x, signp] = this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
                 let x = this.read_scalar(x)?.to_f64()?;
                 let signp = this.deref_pointer_as(signp, this.machine.layouts.i32)?;
 
@@ -940,7 +1012,8 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
 
             // LLVM intrinsics
             "llvm.prefetch" => {
-                let [p, rw, loc, ty] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
+                let [p, rw, loc, ty] =
+                    this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
 
                 let _ = this.read_pointer(p)?;
                 let rw = this.read_scalar(rw)?.to_i32()?;
@@ -967,7 +1040,7 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
             // Used to implement the x86 `_mm{,256,512}_popcnt_epi{8,16,32,64}` and wasm
             // `{i,u}8x16_popcnt` functions.
             name if name.starts_with("llvm.ctpop.v") => {
-                let [op] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
+                let [op] = this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
 
                 let (op, op_len) = this.project_to_simd(op)?;
                 let (dest, dest_len) = this.project_to_simd(dest)?;
@@ -1003,7 +1076,7 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
             }
             // FIXME: Move this to an `arm` submodule.
             "llvm.arm.hint" if this.tcx.sess.target.arch == "arm" => {
-                let [arg] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
+                let [arg] = this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
                 let arg = this.read_scalar(arg)?.to_i32()?;
                 // Note that different arguments might have different target feature requirements.
                 match arg {

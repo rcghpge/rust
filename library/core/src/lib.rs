@@ -39,9 +39,9 @@
 //!   return. You should mark your implementation using `#[panic_handler]`.
 //!
 //! * `rust_eh_personality` - is used by the failure mechanisms of the
-//!    compiler. This is often mapped to GCC's personality function, but crates
-//!    which do not trigger a panic can be assured that this function is never
-//!    called. The `lang` attribute is called `eh_personality`.
+//!   compiler. This is often mapped to GCC's personality function, but crates
+//!   which do not trigger a panic can be assured that this function is never
+//!   called. The `lang` attribute is called `eh_personality`.
 
 #![stable(feature = "core", since = "1.6.0")]
 #![doc(
@@ -89,7 +89,7 @@
 #![allow(internal_features)]
 #![deny(ffi_unwind_calls)]
 #![warn(unreachable_pub)]
-// Do not check link redundancy on bootstraping phase
+// Do not check link redundancy on bootstrapping phase
 #![allow(rustdoc::redundant_explicit_links)]
 #![warn(rustdoc::unescaped_backticks)]
 //
@@ -103,6 +103,8 @@
 #![feature(cfg_select)]
 #![feature(cfg_target_has_reliable_f16_f128)]
 #![feature(const_carrying_mul_add)]
+#![feature(const_cmp)]
+#![feature(const_destruct)]
 #![feature(const_eval_select)]
 #![feature(core_intrinsics)]
 #![feature(coverage_attribute)]
@@ -145,21 +147,23 @@
 #![feature(const_trait_impl)]
 #![feature(decl_macro)]
 #![feature(deprecated_suggestion)]
+#![feature(derive_const)]
 #![feature(doc_cfg)]
 #![feature(doc_cfg_hide)]
 #![feature(doc_notable_trait)]
 #![feature(extern_types)]
-#![feature(f128)]
 #![feature(f16)]
+#![feature(f128)]
 #![feature(freeze_impls)]
 #![feature(fundamental)]
-#![feature(generic_arg_infer)]
+#![feature(funnel_shifts)]
 #![feature(if_let_guard)]
 #![feature(intra_doc_pointers)]
 #![feature(intrinsics)]
 #![feature(lang_items)]
 #![feature(link_llvm_intrinsics)]
 #![feature(macro_metavar_expr)]
+#![feature(macro_metavar_expr_concat)]
 #![feature(marker_trait_attr)]
 #![feature(min_specialization)]
 #![feature(multiple_supertrait_upcastable)]
@@ -169,6 +173,7 @@
 #![feature(no_core)]
 #![feature(optimize_attribute)]
 #![feature(prelude_import)]
+#![feature(reborrow)]
 #![feature(repr_simd)]
 #![feature(rustc_allow_const_fn_unstable)]
 #![feature(rustc_attrs)]
@@ -192,12 +197,11 @@
 #![feature(hexagon_target_feature)]
 #![feature(loongarch_target_feature)]
 #![feature(mips_target_feature)]
+#![feature(nvptx_target_feature)]
 #![feature(powerpc_target_feature)]
 #![feature(riscv_target_feature)]
 #![feature(rtm_target_feature)]
 #![feature(s390x_target_feature)]
-#![feature(sse4a_target_feature)]
-#![feature(tbm_target_feature)]
 #![feature(wasm_target_feature)]
 #![feature(x86_amx_intrinsics)]
 // tidy-alphabetical-end
@@ -205,6 +209,10 @@
 // allow using `core::` in intra-doc links
 #[allow(unused_extern_crates)]
 extern crate self as core;
+
+/* The core prelude, not as all-encompassing as the std prelude */
+// The compiler expects the prelude definition to be defined before it's use statement.
+pub mod prelude;
 
 #[prelude_import]
 #[allow(unused)]
@@ -218,6 +226,13 @@ mod macros;
 pub mod assert_matches {
     #[unstable(feature = "assert_matches", issue = "82775")]
     pub use crate::macros::{assert_matches, debug_assert_matches};
+}
+
+#[unstable(feature = "derive_from", issue = "144889")]
+/// Unstable module containing the unstable `From` derive macro.
+pub mod from {
+    #[unstable(feature = "derive_from", issue = "144889")]
+    pub use crate::macros::builtin::From;
 }
 
 // We don't export this through #[macro_export] for now, to avoid breakage.
@@ -291,10 +306,6 @@ pub mod f64;
 #[macro_use]
 pub mod num;
 
-/* The core prelude, not as all-encompassing as the std prelude */
-
-pub mod prelude;
-
 /* Core modules for ownership management */
 
 pub mod hint;
@@ -352,6 +363,8 @@ pub mod hash;
 pub mod slice;
 pub mod str;
 pub mod time;
+
+pub mod wtf8;
 
 pub mod unicode;
 

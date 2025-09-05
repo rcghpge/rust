@@ -31,7 +31,7 @@ use crate::traits::{
 ///
 /// Currently that is `Self` in supertraits. This is needed
 /// because `dyn_compatibility_violations` can't be used during
-/// type collection.
+/// type collection, as type collection is needed for `dyn_compatibility_violations` itself.
 #[instrument(level = "debug", skip(tcx), ret)]
 pub fn hir_ty_lowering_dyn_compatibility_violations(
     tcx: TyCtxt<'_>,
@@ -105,6 +105,10 @@ fn dyn_compatibility_violations_for_trait(
     let spans = super_predicates_have_non_lifetime_binders(tcx, trait_def_id);
     if !spans.is_empty() {
         violations.push(DynCompatibilityViolation::SupertraitNonLifetimeBinder(spans));
+    }
+    let spans = super_predicates_are_unconditionally_const(tcx, trait_def_id);
+    if !spans.is_empty() {
+        violations.push(DynCompatibilityViolation::SupertraitConst(spans));
     }
 
     violations
@@ -238,6 +242,7 @@ fn predicate_references_self<'tcx>(
         // FIXME(generic_const_exprs): this can mention `Self`
         | ty::ClauseKind::ConstEvaluatable(..)
         | ty::ClauseKind::HostEffect(..)
+        | ty::ClauseKind::UnstableFeature(_)
          => None,
     }
 }
@@ -246,13 +251,28 @@ fn super_predicates_have_non_lifetime_binders(
     tcx: TyCtxt<'_>,
     trait_def_id: DefId,
 ) -> SmallVec<[Span; 1]> {
-    // If non_lifetime_binders is disabled, then exit early
-    if !tcx.features().non_lifetime_binders() {
-        return SmallVec::new();
-    }
     tcx.explicit_super_predicates_of(trait_def_id)
         .iter_identity_copied()
         .filter_map(|(pred, span)| pred.has_non_region_bound_vars().then_some(span))
+        .collect()
+}
+
+/// Checks for `const Trait` supertraits. We're okay with `[const] Trait`,
+/// supertraits since for a non-const instantiation of that trait, the
+/// conditionally-const supertrait is also not required to be const.
+fn super_predicates_are_unconditionally_const(
+    tcx: TyCtxt<'_>,
+    trait_def_id: DefId,
+) -> SmallVec<[Span; 1]> {
+    tcx.explicit_super_predicates_of(trait_def_id)
+        .iter_identity_copied()
+        .filter_map(|(pred, span)| {
+            if let ty::ClauseKind::HostEffect(_) = pred.kind().skip_binder() {
+                Some(span)
+            } else {
+                None
+            }
+        })
         .collect()
 }
 
@@ -278,6 +298,7 @@ fn generics_require_sized_self(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
         | ty::ClauseKind::ConstArgHasType(_, _)
         | ty::ClauseKind::WellFormed(_)
         | ty::ClauseKind::ConstEvaluatable(_)
+        | ty::ClauseKind::UnstableFeature(_)
         | ty::ClauseKind::HostEffect(..) => false,
     })
 }
@@ -593,7 +614,7 @@ fn receiver_is_dispatchable<'tcx>(
         // will cause ambiguity that the user can't really avoid.
         //
         // We leave out certain complexities of the param-env query here. Specifically, we:
-        // 1. Do not add `~const` bounds since there are no `dyn const Trait`s.
+        // 1. Do not add `[const]` bounds since there are no `dyn const Trait`s.
         // 2. Do not add RPITIT self projection bounds for defaulted methods, since we
         //    are not constructing a param-env for "inside" of the body of the defaulted
         //    method, so we don't really care about projecting to a specific RPIT type,

@@ -16,6 +16,7 @@ use tracing::debug;
 use crate::builder::Builder;
 use crate::common::Funclet;
 use crate::context::CodegenCx;
+use crate::llvm::ToLlvmBool;
 use crate::type_::Type;
 use crate::type_of::LayoutLlvmExt;
 use crate::value::Value;
@@ -384,15 +385,19 @@ impl<'tcx> AsmCodegenMethods<'tcx> for CodegenCx<'_, 'tcx> {
     ) {
         let asm_arch = self.tcx.sess.asm_arch.unwrap();
 
-        // Default to Intel syntax on x86
-        let intel_syntax = matches!(asm_arch, InlineAsmArch::X86 | InlineAsmArch::X86_64)
-            && !options.contains(InlineAsmOptions::ATT_SYNTAX);
-
         // Build the template string
         let mut template_str = String::new();
-        if intel_syntax {
-            template_str.push_str(".intel_syntax\n");
+
+        // On X86 platforms there are two assembly syntaxes. Rust uses intel by default,
+        // but AT&T can be specified explicitly.
+        if matches!(asm_arch, InlineAsmArch::X86 | InlineAsmArch::X86_64) {
+            if options.contains(InlineAsmOptions::ATT_SYNTAX) {
+                template_str.push_str(".att_syntax\n")
+            } else {
+                template_str.push_str(".intel_syntax\n")
+            }
         }
+
         for piece in template {
             match *piece {
                 InlineAsmTemplatePiece::String(ref s) => template_str.push_str(s),
@@ -431,7 +436,11 @@ impl<'tcx> AsmCodegenMethods<'tcx> for CodegenCx<'_, 'tcx> {
                 }
             }
         }
-        if intel_syntax {
+
+        // Just to play it safe, if intel was used, reset the assembly syntax to att.
+        if matches!(asm_arch, InlineAsmArch::X86 | InlineAsmArch::X86_64)
+            && !options.contains(InlineAsmOptions::ATT_SYNTAX)
+        {
             template_str.push_str("\n.att_syntax\n");
         }
 
@@ -462,10 +471,6 @@ pub(crate) fn inline_asm_call<'ll>(
     dest: Option<&'ll llvm::BasicBlock>,
     catch_funclet: Option<(&'ll llvm::BasicBlock, Option<&Funclet<'ll>>)>,
 ) -> Option<&'ll Value> {
-    let volatile = if volatile { llvm::True } else { llvm::False };
-    let alignstack = if alignstack { llvm::True } else { llvm::False };
-    let can_throw = if unwind { llvm::True } else { llvm::False };
-
     let argtys = inputs
         .iter()
         .map(|v| {
@@ -492,10 +497,10 @@ pub(crate) fn inline_asm_call<'ll>(
             asm.len(),
             cons.as_ptr(),
             cons.len(),
-            volatile,
-            alignstack,
+            volatile.to_llvm_bool(),
+            alignstack.to_llvm_bool(),
             dia,
-            can_throw,
+            unwind.to_llvm_bool(),
         )
     };
 

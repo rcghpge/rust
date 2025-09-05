@@ -1,6 +1,6 @@
-hir_typeck_abi_custom_call =
-    functions with the `"custom"` ABI cannot be called
-    .note = an `extern "custom"` function can only be called from within inline assembly
+hir_typeck_abi_cannot_be_called =
+    functions with the {$abi} ABI cannot be called
+    .note = an `extern {$abi}` function can only be called using inline assembly
 
 hir_typeck_add_missing_parentheses_in_range = you must surround the range in parentheses to call its `{$func_name}` function
 
@@ -79,12 +79,8 @@ hir_typeck_cast_unknown_pointer = cannot cast {$to ->
     .note = the type information given here is insufficient to check whether the pointer cast is valid
     .label_from = the type information given here is insufficient to check whether the pointer cast is valid
 
-hir_typeck_const_select_must_be_const = this argument must be a `const fn`
-    .help = consult the documentation on `const_eval_select` for more information
-
-hir_typeck_const_select_must_be_fn = this argument must be a function item
-    .note = expected a function item, found {$ty}
-    .help = consult the documentation on `const_eval_select` for more information
+hir_typeck_const_continue_bad_label =
+    `#[const_continue]` must break to a labeled block that participates in a `#[loop_match]`
 
 hir_typeck_continue_labeled_block =
     `continue` pointing to a labeled block
@@ -163,7 +159,7 @@ hir_typeck_lossy_provenance_ptr2int =
     .suggestion = use `.addr()` to obtain the address of a pointer
     .help = if you can't comply with strict provenance and need to expose the pointer provenance you can use `.expose_provenance()` instead
 
-hir_typeck_missing_parentheses_in_range = can't call method `{$method_name}` on type `{$ty_str}`
+hir_typeck_missing_parentheses_in_range = can't call method `{$method_name}` on type `{$ty}`
 
 hir_typeck_naked_asm_outside_naked_fn =
     the `naked_asm!` macro can only be used in functions marked with `#[unsafe(naked)]`
@@ -188,7 +184,7 @@ hir_typeck_never_type_fallback_flowing_into_unsafe_path = never type fallback af
 hir_typeck_never_type_fallback_flowing_into_unsafe_union_field = never type fallback affects this union access
     .help = specify the type explicitly
 
-hir_typeck_no_associated_item = no {$item_kind} named `{$item_ident}` found for {$ty_prefix} `{$ty_str}`{$trait_missing_method ->
+hir_typeck_no_associated_item = no {$item_kind} named `{$item_ident}` found for {$ty_prefix} `{$ty}`{$trait_missing_method ->
     [true] {""}
     *[other] {" "}in the current scope
 }

@@ -15,6 +15,7 @@ mod float;
 #[cfg(no_fp_fmt_parse)]
 mod nofloat;
 mod num;
+mod num_buffer;
 mod rt;
 
 #[stable(feature = "fmt_flags_align", since = "1.28.0")]
@@ -32,6 +33,9 @@ pub enum Alignment {
     /// Indication that contents should be center-aligned.
     Center,
 }
+
+#[unstable(feature = "int_format_into", issue = "138215")]
+pub use num_buffer::{NumBuffer, NumBufferTrait};
 
 #[stable(feature = "debug_builders", since = "1.2.0")]
 pub use self::builders::{DebugList, DebugMap, DebugSet, DebugStruct, DebugTuple};
@@ -349,13 +353,13 @@ impl FormattingOptions {
     /// Sets or removes the sign (the `+` or the `-` flag).
     ///
     /// - `+`: This is intended for numeric types and indicates that the sign
-    /// should always be printed. By default only the negative sign of signed
-    /// values is printed, and the sign of positive or unsigned values is
-    /// omitted. This flag indicates that the correct sign (+ or -) should
-    /// always be printed.
+    ///   should always be printed. By default only the negative sign of signed
+    ///   values is printed, and the sign of positive or unsigned values is
+    ///   omitted. This flag indicates that the correct sign (+ or -) should
+    ///   always be printed.
     /// - `-`: Currently not used
     #[unstable(feature = "formatting_options", issue = "118117")]
-    pub fn sign(&mut self, sign: Option<Sign>) -> &mut Self {
+    pub const fn sign(&mut self, sign: Option<Sign>) -> &mut Self {
         let sign = match sign {
             None => 0,
             Some(Sign::Plus) => flags::SIGN_PLUS_FLAG,
@@ -368,7 +372,7 @@ impl FormattingOptions {
     ///
     /// This is used to indicate for integer formats that the padding to width should both be done with a 0 character as well as be sign-aware
     #[unstable(feature = "formatting_options", issue = "118117")]
-    pub fn sign_aware_zero_pad(&mut self, sign_aware_zero_pad: bool) -> &mut Self {
+    pub const fn sign_aware_zero_pad(&mut self, sign_aware_zero_pad: bool) -> &mut Self {
         if sign_aware_zero_pad {
             self.flags |= flags::SIGN_AWARE_ZERO_PAD_FLAG;
         } else {
@@ -385,7 +389,7 @@ impl FormattingOptions {
     /// - [`Octal`] - precedes the argument with a `0b`
     /// - [`Binary`] - precedes the argument with a `0o`
     #[unstable(feature = "formatting_options", issue = "118117")]
-    pub fn alternate(&mut self, alternate: bool) -> &mut Self {
+    pub const fn alternate(&mut self, alternate: bool) -> &mut Self {
         if alternate {
             self.flags |= flags::ALTERNATE_FLAG;
         } else {
@@ -400,7 +404,7 @@ impl FormattingOptions {
     /// being formatted is smaller than width some extra characters will be
     /// printed around it.
     #[unstable(feature = "formatting_options", issue = "118117")]
-    pub fn fill(&mut self, fill: char) -> &mut Self {
+    pub const fn fill(&mut self, fill: char) -> &mut Self {
         self.flags = self.flags & (u32::MAX << 21) | fill as u32;
         self
     }
@@ -409,7 +413,7 @@ impl FormattingOptions {
     /// The alignment specifies how the value being formatted should be
     /// positioned if it is smaller than the width of the formatter.
     #[unstable(feature = "formatting_options", issue = "118117")]
-    pub fn align(&mut self, align: Option<Alignment>) -> &mut Self {
+    pub const fn align(&mut self, align: Option<Alignment>) -> &mut Self {
         let align: u32 = match align {
             Some(Alignment::Left) => flags::ALIGN_LEFT,
             Some(Alignment::Right) => flags::ALIGN_RIGHT,
@@ -426,7 +430,7 @@ impl FormattingOptions {
     /// the padding specified by [`FormattingOptions::fill`]/[`FormattingOptions::align`]
     /// will be used to take up the required space.
     #[unstable(feature = "formatting_options", issue = "118117")]
-    pub fn width(&mut self, width: Option<u16>) -> &mut Self {
+    pub const fn width(&mut self, width: Option<u16>) -> &mut Self {
         if let Some(width) = width {
             self.flags |= flags::WIDTH_FLAG;
             self.width = width;
@@ -439,14 +443,14 @@ impl FormattingOptions {
     /// Sets or removes the precision.
     ///
     /// - For non-numeric types, this can be considered a “maximum width”. If
-    /// the resulting string is longer than this width, then it is truncated
-    /// down to this many characters and that truncated value is emitted with
-    /// proper fill, alignment and width if those parameters are set.
+    ///   the resulting string is longer than this width, then it is truncated
+    ///   down to this many characters and that truncated value is emitted with
+    ///   proper fill, alignment and width if those parameters are set.
     /// - For integral types, this is ignored.
     /// - For floating-point types, this indicates how many digits after the
     /// decimal point should be printed.
     #[unstable(feature = "formatting_options", issue = "118117")]
-    pub fn precision(&mut self, precision: Option<u16>) -> &mut Self {
+    pub const fn precision(&mut self, precision: Option<u16>) -> &mut Self {
         if let Some(precision) = precision {
             self.flags |= flags::PRECISION_FLAG;
             self.precision = precision;
@@ -459,7 +463,7 @@ impl FormattingOptions {
     /// Specifies whether the [`Debug`] trait should use lower-/upper-case
     /// hexadecimal or normal integers
     #[unstable(feature = "formatting_options", issue = "118117")]
-    pub fn debug_as_hex(&mut self, debug_as_hex: Option<DebugAsHex>) -> &mut Self {
+    pub const fn debug_as_hex(&mut self, debug_as_hex: Option<DebugAsHex>) -> &mut Self {
         let debug_as_hex = match debug_as_hex {
             None => 0,
             Some(DebugAsHex::Lower) => flags::DEBUG_LOWER_HEX_FLAG,
@@ -533,7 +537,7 @@ impl FormattingOptions {
     ///
     /// You may alternatively use [`Formatter::new()`].
     #[unstable(feature = "formatting_options", issue = "118117")]
-    pub fn create_formatter<'a>(self, write: &'a mut (dyn Write + 'a)) -> Formatter<'a> {
+    pub const fn create_formatter<'a>(self, write: &'a mut (dyn Write + 'a)) -> Formatter<'a> {
         Formatter { options: self, buf: write }
     }
 }
@@ -574,13 +578,13 @@ impl<'a> Formatter<'a> {
     ///
     /// You may alternatively use [`FormattingOptions::create_formatter()`].
     #[unstable(feature = "formatting_options", issue = "118117")]
-    pub fn new(write: &'a mut (dyn Write + 'a), options: FormattingOptions) -> Self {
+    pub const fn new(write: &'a mut (dyn Write + 'a), options: FormattingOptions) -> Self {
         Formatter { options, buf: write }
     }
 
     /// Creates a new formatter based on this one with given [`FormattingOptions`].
     #[unstable(feature = "formatting_options", issue = "118117")]
-    pub fn with_options<'b>(&'b mut self, options: FormattingOptions) -> Formatter<'b> {
+    pub const fn with_options<'b>(&'b mut self, options: FormattingOptions) -> Formatter<'b> {
         Formatter { options, buf: self.buf }
     }
 }
@@ -850,16 +854,17 @@ impl Display for Arguments<'_> {
 /// }";
 /// assert_eq!(format!("The origin is: {origin:#?}"), expected);
 /// ```
-
 #[stable(feature = "rust1", since = "1.0.0")]
 #[rustc_on_unimplemented(
     on(
         crate_local,
-        label = "`{Self}` cannot be formatted using `{{:?}}`",
         note = "add `#[derive(Debug)]` to `{Self}` or manually `impl {This} for {Self}`"
     ),
-    message = "`{Self}` doesn't implement `{This}`",
-    label = "`{Self}` cannot be formatted using `{{:?}}` because it doesn't implement `{This}`"
+    on(
+        from_desugaring = "FormatLiteral",
+        label = "`{Self}` cannot be formatted using `{{:?}}` because it doesn't implement `{This}`"
+    ),
+    message = "`{Self}` doesn't implement `{This}`"
 )]
 #[doc(alias = "{:?}")]
 #[rustc_diagnostic_item = "Debug"]
@@ -986,11 +991,14 @@ pub use macros::Debug;
         any(Self = "std::path::Path", Self = "std::path::PathBuf"),
         label = "`{Self}` cannot be formatted with the default formatter; call `.display()` on it",
         note = "call `.display()` or `.to_string_lossy()` to safely print paths, \
-                as they may contain non-Unicode data"
+                as they may contain non-Unicode data",
     ),
-    message = "`{Self}` doesn't implement `{This}`",
-    label = "`{Self}` cannot be formatted with the default formatter",
-    note = "in format strings you may be able to use `{{:?}}` (or {{:#?}} for pretty-print) instead"
+    on(
+        from_desugaring = "FormatLiteral",
+        note = "in format strings you may be able to use `{{:?}}` (or {{:#?}} for pretty-print) instead",
+        label = "`{Self}` cannot be formatted with the default formatter",
+    ),
+    message = "`{Self}` doesn't implement `{This}`"
 )]
 #[doc(alias = "{}")]
 #[rustc_diagnostic_item = "Display"]
@@ -2862,7 +2870,7 @@ macro_rules! tuple {
         maybe_tuple_doc! {
             $($name)+ @
             #[stable(feature = "rust1", since = "1.0.0")]
-            impl<$($name:Debug),+> Debug for ($($name,)+) where last_type!($($name,)+): ?Sized {
+            impl<$($name:Debug),+> Debug for ($($name,)+) {
                 #[allow(non_snake_case, unused_assignments)]
                 fn fmt(&self, f: &mut Formatter<'_>) -> Result {
                     let mut builder = f.debug_tuple("");
@@ -2891,11 +2899,6 @@ macro_rules! maybe_tuple_doc {
         #[$meta]
         $item
     };
-}
-
-macro_rules! last_type {
-    ($a:ident,) => { $a };
-    ($a:ident, $($rest_a:ident,)+) => { last_type!($($rest_a,)+) };
 }
 
 tuple! { E, D, C, B, A, Z, Y, X, W, V, U, T, }

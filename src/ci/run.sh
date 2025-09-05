@@ -86,13 +86,12 @@ fi
 # space required for CI artifacts.
 RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --dist-compression-formats=xz"
 
-if [ "$EXTERNAL_LLVM" = "1" ]; then
-  RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --set rust.lld=false"
-fi
-
 # Enable the `c` feature for compiler_builtins, but only when the `compiler-rt` source is available
 # (to avoid spending a lot of time cloning llvm)
 if [ "$EXTERNAL_LLVM" = "" ]; then
+  # Enable building & shipping lld
+  RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --set rust.lld=true"
+
   RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --set build.optimized-compiler-builtins"
   # Likewise, only demand we test all LLVM components if we know we built LLVM with them
   export COMPILETEST_REQUIRE_ALL_LLVM_COMPONENTS=1
@@ -205,6 +204,9 @@ if [ "$ENABLE_GCC_CODEGEN" = "1" ]; then
   # if we run `cg_gcc` tests.
   RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --enable-new-symbol-mangling"
 fi
+
+# If bootstrap fails, we want to see its backtrace
+export RUST_BACKTRACE=1
 
 # Print the date from the local machine and the date from an external source to
 # check for clock drifts. An HTTP URL is used instead of HTTPS since on Azure

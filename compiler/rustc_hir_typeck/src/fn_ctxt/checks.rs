@@ -11,7 +11,7 @@ use rustc_hir::{ExprKind, HirId, LangItem, Node, QPath};
 use rustc_hir_analysis::check::potentially_plural_count;
 use rustc_hir_analysis::hir_ty_lowering::{HirTyLowerer, PermitVariants};
 use rustc_index::IndexVec;
-use rustc_infer::infer::{DefineOpaqueTypes, InferOk, TypeTrace};
+use rustc_infer::infer::{BoundRegionConversionTime, DefineOpaqueTypes, InferOk, TypeTrace};
 use rustc_middle::ty::adjustment::AllowTwoPhase;
 use rustc_middle::ty::error::TypeError;
 use rustc_middle::ty::{self, IsSuggestable, Ty, TyCtxt, TypeVisitableExt};
@@ -30,7 +30,6 @@ use crate::TupleArgumentsFlag::*;
 use crate::coercion::CoerceMany;
 use crate::errors::SuggestPtrNullMut;
 use crate::fn_ctxt::arg_matrix::{ArgMatrix, Compatibility, Error, ExpectedIdx, ProvidedIdx};
-use crate::fn_ctxt::infer::FnCall;
 use crate::gather_locals::Declaration;
 use crate::inline_asm::InlineAsmCtxt;
 use crate::method::probe::IsSuggestion;
@@ -84,14 +83,6 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         *self.deferred_cast_checks.borrow_mut() = deferred_cast_checks;
     }
 
-    pub(in super::super) fn check_transmutes(&self) {
-        let mut deferred_transmute_checks = self.deferred_transmute_checks.borrow_mut();
-        debug!("FnCtxt::check_transmutes: {} deferred checks", deferred_transmute_checks.len());
-        for (from, to, hir_id) in deferred_transmute_checks.drain(..) {
-            self.check_transmute(from, to, hir_id);
-        }
-    }
-
     pub(in super::super) fn check_asms(&self) {
         let mut deferred_asm_checks = self.deferred_asm_checks.borrow_mut();
         debug!("FnCtxt::check_asm: {} deferred checks", deferred_asm_checks.len());
@@ -122,7 +113,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     _ => {}
                 }
 
-                // We want to emit an error if the const is not structurally resolveable
+                // We want to emit an error if the const is not structurally resolvable
                 // as otherwise we can wind up conservatively proving `Copy` which may
                 // infer the repeat expr count to something that never required `Copy` in
                 // the first place.
@@ -242,6 +233,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 arg_expr.span,
                 ObligationCauseCode::WellFormed(None),
             );
+
+            self.check_place_expr_if_unsized(fn_input_ty, arg_expr);
         }
 
         // First, let's unify the formal method signature with the expectation eagerly.
@@ -544,6 +537,21 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         }
     }
 
+    /// If `unsized_fn_params` is active, check that unsized values are place expressions. Since
+    /// the removal of `unsized_locals` in <https://github.com/rust-lang/rust/pull/142911> we can't
+    /// store them in MIR locals as temporaries.
+    ///
+    /// If `unsized_fn_params` is inactive, this will be checked in borrowck instead.
+    fn check_place_expr_if_unsized(&self, ty: Ty<'tcx>, expr: &'tcx hir::Expr<'tcx>) {
+        if self.tcx.features().unsized_fn_params() && !expr.is_syntactic_place_expr() {
+            self.require_type_is_sized(
+                ty,
+                expr.span,
+                ObligationCauseCode::UnsizedNonPlaceExpr(expr.span),
+            );
+        }
+    }
+
     fn report_arg_errors(
         &self,
         compatibility_diagonal: IndexVec<ProvidedIdx, Compatibility<'tcx>>,
@@ -657,7 +665,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 let args = self.infcx.fresh_args_for_item(call_name.span, assoc.def_id);
                 let fn_sig = tcx.fn_sig(assoc.def_id).instantiate(tcx, args);
 
-                self.instantiate_binder_with_fresh_vars(call_name.span, FnCall, fn_sig);
+                self.instantiate_binder_with_fresh_vars(
+                    call_name.span,
+                    BoundRegionConversionTime::FnCall,
+                    fn_sig,
+                );
             }
             None
         };
@@ -1569,25 +1581,63 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 // e.g. `reuse HasSelf::method;` should suggest `reuse HasSelf::method($args);`.
                 full_call_span.shrink_to_hi()
             };
+
+            // Controls how the arguments should be listed in the suggestion.
+            enum ArgumentsFormatting {
+                SingleLine,
+                Multiline { fallback_indent: String, brace_indent: String },
+            }
+            let arguments_formatting = {
+                let mut provided_inputs = matched_inputs.iter().filter_map(|a| *a);
+                if let Some(brace_indent) = source_map.indentation_before(suggestion_span)
+                    && let Some(first_idx) = provided_inputs.by_ref().next()
+                    && let Some(last_idx) = provided_inputs.by_ref().next()
+                    && let (_, first_span) = provided_arg_tys[first_idx]
+                    && let (_, last_span) = provided_arg_tys[last_idx]
+                    && source_map.is_multiline(first_span.to(last_span))
+                    && let Some(fallback_indent) = source_map.indentation_before(first_span)
+                {
+                    ArgumentsFormatting::Multiline { fallback_indent, brace_indent }
+                } else {
+                    ArgumentsFormatting::SingleLine
+                }
+            };
+
             let mut suggestion = "(".to_owned();
             let mut needs_comma = false;
             for (expected_idx, provided_idx) in matched_inputs.iter_enumerated() {
                 if needs_comma {
-                    suggestion += ", ";
-                } else {
-                    needs_comma = true;
+                    suggestion += ",";
                 }
-                let suggestion_text = if let Some(provided_idx) = provided_idx
+                match &arguments_formatting {
+                    ArgumentsFormatting::SingleLine if needs_comma => suggestion += " ",
+                    ArgumentsFormatting::SingleLine => {}
+                    ArgumentsFormatting::Multiline { .. } => suggestion += "\n",
+                }
+                needs_comma = true;
+                let (suggestion_span, suggestion_text) = if let Some(provided_idx) = provided_idx
                     && let (_, provided_span) = provided_arg_tys[*provided_idx]
                     && let Ok(arg_text) = source_map.span_to_snippet(provided_span)
                 {
-                    arg_text
+                    (Some(provided_span), arg_text)
                 } else {
                     // Propose a placeholder of the correct type
                     let (_, expected_ty) = formal_and_expected_inputs[expected_idx];
-                    ty_to_snippet(expected_ty, expected_idx)
+                    (None, ty_to_snippet(expected_ty, expected_idx))
                 };
+                if let ArgumentsFormatting::Multiline { fallback_indent, .. } =
+                    &arguments_formatting
+                {
+                    let indent = suggestion_span
+                        .and_then(|span| source_map.indentation_before(span))
+                        .unwrap_or_else(|| fallback_indent.clone());
+                    suggestion += &indent;
+                }
                 suggestion += &suggestion_text;
+            }
+            if let ArgumentsFormatting::Multiline { brace_indent, .. } = arguments_formatting {
+                suggestion += ",\n";
+                suggestion += &brace_indent;
             }
             suggestion += ")";
             err.span_suggestion_verbose(
@@ -1634,12 +1684,12 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             ast::LitKind::ByteStr(ref v, _) => Ty::new_imm_ref(
                 tcx,
                 tcx.lifetimes.re_static,
-                Ty::new_array(tcx, tcx.types.u8, v.len() as u64),
+                Ty::new_array(tcx, tcx.types.u8, v.as_byte_str().len() as u64),
             ),
             ast::LitKind::Byte(_) => tcx.types.u8,
             ast::LitKind::Char(_) => tcx.types.char,
-            ast::LitKind::Int(_, ast::LitIntType::Signed(t)) => Ty::new_int(tcx, ty::int_ty(t)),
-            ast::LitKind::Int(_, ast::LitIntType::Unsigned(t)) => Ty::new_uint(tcx, ty::uint_ty(t)),
+            ast::LitKind::Int(_, ast::LitIntType::Signed(t)) => Ty::new_int(tcx, t),
+            ast::LitKind::Int(_, ast::LitIntType::Unsigned(t)) => Ty::new_uint(tcx, t),
             ast::LitKind::Int(i, ast::LitIntType::Unsuffixed) => {
                 let opt_ty = expected.to_option(self).and_then(|ty| match ty.kind() {
                     ty::Int(_) | ty::Uint(_) => Some(ty),
@@ -1666,9 +1716,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 });
                 opt_ty.unwrap_or_else(|| self.next_int_var())
             }
-            ast::LitKind::Float(_, ast::LitFloatType::Suffixed(t)) => {
-                Ty::new_float(tcx, ty::float_ty(t))
-            }
+            ast::LitKind::Float(_, ast::LitFloatType::Suffixed(t)) => Ty::new_float(tcx, t),
             ast::LitKind::Float(_, ast::LitFloatType::Unsuffixed) => {
                 let opt_ty = expected.to_option(self).and_then(|ty| match ty.kind() {
                     ty::Float(_) => Some(ty),
@@ -1870,7 +1918,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 });
             }
             hir::StmtKind::Semi(expr) => {
-                self.check_expr(expr);
+                let ty = self.check_expr(expr);
+                self.check_place_expr_if_unsized(ty, expr);
             }
         }
 
@@ -2115,10 +2164,10 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             )
         };
 
-        if let hir::ExprKind::If(_, _, Some(el)) = expr.kind {
-            if let Some(rslt) = check_in_progress(el) {
-                return rslt;
-            }
+        if let hir::ExprKind::If(_, _, Some(el)) = expr.kind
+            && let Some(rslt) = check_in_progress(el)
+        {
+            return rslt;
         }
 
         if let hir::ExprKind::Match(_, arms, _) = expr.kind {
@@ -2458,7 +2507,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                             spans.push_span_label(param.param.span(), "");
                         }
                     }
-                    // Highligh each parameter being depended on for a generic type.
+                    // Highlight each parameter being depended on for a generic type.
                     for ((&(_, param), deps), &(_, expected_ty)) in
                         params_with_generics.iter().zip(&dependants).zip(formal_and_expected_inputs)
                     {

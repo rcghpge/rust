@@ -10,8 +10,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use rustc_ast::attr::AttrIdGenerator;
-use rustc_ast::ptr::P;
-use rustc_ast::token::{self, CommentKind, Delimiter, IdentIsRaw, Token, TokenKind};
+use rustc_ast::token::{self, CommentKind, Delimiter, Token, TokenKind};
 use rustc_ast::tokenstream::{Spacing, TokenStream, TokenTree};
 use rustc_ast::util::classify;
 use rustc_ast::util::comments::{Comment, CommentStyle};
@@ -120,7 +119,7 @@ fn gather_comments(sm: &SourceMap, path: FileName, src: String) -> Vec<Comment> 
         pos += shebang_len;
     }
 
-    for token in rustc_lexer::tokenize(&text[pos..]) {
+    for token in rustc_lexer::tokenize(&text[pos..], rustc_lexer::FrontmatterAllowed::Yes) {
         let token_text = &text[pos..pos + token.len as usize];
         match token.kind {
             rustc_lexer::TokenKind::Whitespace => {
@@ -170,6 +169,14 @@ fn gather_comments(sm: &SourceMap, path: FileName, src: String) -> Vec<Comment> 
                         pos: start_bpos + BytePos(pos as u32),
                     })
                 }
+            }
+            rustc_lexer::TokenKind::Frontmatter { .. } => {
+                code_to_the_left = false;
+                comments.push(Comment {
+                    style: CommentStyle::Isolated,
+                    lines: vec![token_text.to_string()],
+                    pos: start_bpos + BytePos(pos as u32),
+                });
             }
             _ => {
                 code_to_the_left = true;
@@ -434,7 +441,7 @@ pub trait PrintState<'a>: std::ops::Deref<Target = pp::Printer> + std::ops::Dere
     fn print_generic_args(&mut self, args: &ast::GenericArgs, colons_before_params: bool);
 
     fn print_ident(&mut self, ident: Ident) {
-        self.word(IdentPrinter::for_ast_ident(ident, ident.is_raw_guess()).to_string());
+        self.word(IdentPrinter::for_ast_ident(ident, ident.guess_print_mode()).to_string());
         self.ann_post(ident)
     }
 
@@ -564,10 +571,10 @@ pub trait PrintState<'a>: std::ops::Deref<Target = pp::Printer> + std::ops::Dere
     }
 
     fn maybe_print_trailing_comment(&mut self, span: rustc_span::Span, next_pos: Option<BytePos>) {
-        if let Some(cmnts) = self.comments_mut() {
-            if let Some(cmnt) = cmnts.trailing_comment(span, next_pos) {
-                self.print_comment(cmnt);
-            }
+        if let Some(cmnts) = self.comments_mut()
+            && let Some(cmnt) = cmnts.trailing_comment(span, next_pos)
+        {
+            self.print_comment(cmnt);
         }
     }
 
@@ -1008,17 +1015,16 @@ pub trait PrintState<'a>: std::ops::Deref<Target = pp::Printer> + std::ops::Dere
 
             /* Name components */
             token::Ident(name, is_raw) => {
-                IdentPrinter::new(name, is_raw.into(), convert_dollar_crate).to_string().into()
+                IdentPrinter::new(name, is_raw.to_print_mode_ident(), convert_dollar_crate)
+                    .to_string()
+                    .into()
             }
             token::NtIdent(ident, is_raw) => {
-                IdentPrinter::for_ast_ident(ident, is_raw.into()).to_string().into()
+                IdentPrinter::for_ast_ident(ident, is_raw.to_print_mode_ident()).to_string().into()
             }
 
-            token::Lifetime(name, IdentIsRaw::No)
-            | token::NtLifetime(Ident { name, .. }, IdentIsRaw::No) => name.to_string().into(),
-            token::Lifetime(name, IdentIsRaw::Yes)
-            | token::NtLifetime(Ident { name, .. }, IdentIsRaw::Yes) => {
-                format!("'r#{}", &name.as_str()[1..]).into()
+            token::Lifetime(name, is_raw) | token::NtLifetime(Ident { name, .. }, is_raw) => {
+                IdentPrinter::new(name, is_raw.to_print_mode_lifetime(), None).to_string().into()
             }
 
             /* Other */
@@ -1170,7 +1176,7 @@ impl<'a> State<'a> {
         self.end(rb);
     }
 
-    fn commasep_exprs(&mut self, b: Breaks, exprs: &[P<ast::Expr>]) {
+    fn commasep_exprs(&mut self, b: Breaks, exprs: &[Box<ast::Expr>]) {
         self.commasep_cmnt(b, exprs, |s, e| s.print_expr(e, FixupContext::default()), |e| e.span)
     }
 
@@ -1285,7 +1291,7 @@ impl<'a> State<'a> {
                 self.print_type(typ);
                 self.pclose();
             }
-            ast::TyKind::BareFn(f) => {
+            ast::TyKind::FnPtr(f) => {
                 self.print_ty_fn(f.ext, f.safety, &f.decl, None, &f.generic_params);
             }
             ast::TyKind::UnsafeBinder(f) => {
@@ -1303,7 +1309,6 @@ impl<'a> State<'a> {
             ast::TyKind::TraitObject(bounds, syntax) => {
                 match syntax {
                     ast::TraitObjectSyntax::Dyn => self.word_nbsp("dyn"),
-                    ast::TraitObjectSyntax::DynStar => self.word_nbsp("dyn*"),
                     ast::TraitObjectSyntax::None => {}
                 }
                 self.print_type_bounds(bounds);
@@ -1764,7 +1769,7 @@ impl<'a> State<'a> {
                     },
                     |f| f.pat.span,
                 );
-                if let ast::PatFieldsRest::Rest | ast::PatFieldsRest::Recovered(_) = etc {
+                if let ast::PatFieldsRest::Rest(_) | ast::PatFieldsRest::Recovered(_) = etc {
                     if !fields.is_empty() {
                         self.word_space(",");
                     }

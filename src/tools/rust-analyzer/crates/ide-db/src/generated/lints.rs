@@ -4711,9 +4711,9 @@ The tracking issue for this feature is: [#133668]
         label: "const_trait_impl",
         description: r##"# `const_trait_impl`
 
-The tracking issue for this feature is: [#67792]
+The tracking issue for this feature is: [#143874]
 
-[#67792]: https://github.com/rust-lang/rust/issues/67792
+[#143874]: https://github.com/rust-lang/rust/issues/143874
 
 ------------------------
 "##,
@@ -10698,20 +10698,6 @@ The tracking issue for this feature is: [#77998]
 The tracking issue for this feature is: [#77998]
 
 [#77998]: https://github.com/rust-lang/rust/issues/77998
-
-------------------------
-"##,
-        default_severity: Severity::Allow,
-        warn_since: None,
-        deny_since: None,
-    },
-    Lint {
-        label: "strict_overflow_ops",
-        description: r##"# `strict_overflow_ops`
-
-The tracking issue for this feature is: [#118260]
-
-[#118260]: https://github.com/rust-lang/rust/issues/118260
 
 ------------------------
 "##,

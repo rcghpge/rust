@@ -812,21 +812,6 @@ fn codegen_regular_intrinsic_call<'tcx>(
             dest.write_cvalue(fx, val);
         }
 
-        sym::needs_drop | sym::type_id | sym::type_name | sym::variant_count => {
-            intrinsic_args!(fx, args => (); intrinsic);
-
-            let const_val = fx
-                .tcx
-                .const_eval_instance(
-                    ty::TypingEnv::fully_monomorphized(),
-                    instance,
-                    source_info.span,
-                )
-                .unwrap();
-            let val = crate::constant::codegen_const_value(fx, const_val, ret.layout().ty);
-            ret.write_cvalue(fx, val);
-        }
-
         sym::ptr_offset_from | sym::ptr_offset_from_unsigned => {
             intrinsic_args!(fx, args => (ptr, base); intrinsic);
             let ptr = ptr.load_scalar(fx);
@@ -984,7 +969,7 @@ fn codegen_regular_intrinsic_call<'tcx>(
 
             let layout = amount.layout();
             match layout.ty.kind() {
-                ty::Uint(_) | ty::Int(_) | ty::RawPtr(..) => {}
+                ty::Uint(_) | ty::Int(_) => {}
                 _ => {
                     report_atomic_type_validation_error(fx, intrinsic, source_info.span, layout.ty);
                     return Ok(());
@@ -997,7 +982,7 @@ fn codegen_regular_intrinsic_call<'tcx>(
             let old =
                 fx.bcx.ins().atomic_rmw(ty, MemFlags::trusted(), AtomicRmwOp::Add, ptr, amount);
 
-            let old = CValue::by_val(old, layout);
+            let old = CValue::by_val(old, ret.layout());
             ret.write_cvalue(fx, old);
         }
         sym::atomic_xsub => {
@@ -1006,7 +991,7 @@ fn codegen_regular_intrinsic_call<'tcx>(
 
             let layout = amount.layout();
             match layout.ty.kind() {
-                ty::Uint(_) | ty::Int(_) | ty::RawPtr(..) => {}
+                ty::Uint(_) | ty::Int(_) => {}
                 _ => {
                     report_atomic_type_validation_error(fx, intrinsic, source_info.span, layout.ty);
                     return Ok(());
@@ -1019,7 +1004,7 @@ fn codegen_regular_intrinsic_call<'tcx>(
             let old =
                 fx.bcx.ins().atomic_rmw(ty, MemFlags::trusted(), AtomicRmwOp::Sub, ptr, amount);
 
-            let old = CValue::by_val(old, layout);
+            let old = CValue::by_val(old, ret.layout());
             ret.write_cvalue(fx, old);
         }
         sym::atomic_and => {
@@ -1028,7 +1013,7 @@ fn codegen_regular_intrinsic_call<'tcx>(
 
             let layout = src.layout();
             match layout.ty.kind() {
-                ty::Uint(_) | ty::Int(_) | ty::RawPtr(..) => {}
+                ty::Uint(_) | ty::Int(_) => {}
                 _ => {
                     report_atomic_type_validation_error(fx, intrinsic, source_info.span, layout.ty);
                     return Ok(());
@@ -1040,7 +1025,7 @@ fn codegen_regular_intrinsic_call<'tcx>(
 
             let old = fx.bcx.ins().atomic_rmw(ty, MemFlags::trusted(), AtomicRmwOp::And, ptr, src);
 
-            let old = CValue::by_val(old, layout);
+            let old = CValue::by_val(old, ret.layout());
             ret.write_cvalue(fx, old);
         }
         sym::atomic_or => {
@@ -1049,7 +1034,7 @@ fn codegen_regular_intrinsic_call<'tcx>(
 
             let layout = src.layout();
             match layout.ty.kind() {
-                ty::Uint(_) | ty::Int(_) | ty::RawPtr(..) => {}
+                ty::Uint(_) | ty::Int(_) => {}
                 _ => {
                     report_atomic_type_validation_error(fx, intrinsic, source_info.span, layout.ty);
                     return Ok(());
@@ -1061,7 +1046,7 @@ fn codegen_regular_intrinsic_call<'tcx>(
 
             let old = fx.bcx.ins().atomic_rmw(ty, MemFlags::trusted(), AtomicRmwOp::Or, ptr, src);
 
-            let old = CValue::by_val(old, layout);
+            let old = CValue::by_val(old, ret.layout());
             ret.write_cvalue(fx, old);
         }
         sym::atomic_xor => {
@@ -1070,7 +1055,7 @@ fn codegen_regular_intrinsic_call<'tcx>(
 
             let layout = src.layout();
             match layout.ty.kind() {
-                ty::Uint(_) | ty::Int(_) | ty::RawPtr(..) => {}
+                ty::Uint(_) | ty::Int(_) => {}
                 _ => {
                     report_atomic_type_validation_error(fx, intrinsic, source_info.span, layout.ty);
                     return Ok(());
@@ -1082,7 +1067,7 @@ fn codegen_regular_intrinsic_call<'tcx>(
 
             let old = fx.bcx.ins().atomic_rmw(ty, MemFlags::trusted(), AtomicRmwOp::Xor, ptr, src);
 
-            let old = CValue::by_val(old, layout);
+            let old = CValue::by_val(old, ret.layout());
             ret.write_cvalue(fx, old);
         }
         sym::atomic_nand => {
@@ -1091,7 +1076,7 @@ fn codegen_regular_intrinsic_call<'tcx>(
 
             let layout = src.layout();
             match layout.ty.kind() {
-                ty::Uint(_) | ty::Int(_) | ty::RawPtr(..) => {}
+                ty::Uint(_) | ty::Int(_) => {}
                 _ => {
                     report_atomic_type_validation_error(fx, intrinsic, source_info.span, layout.ty);
                     return Ok(());
@@ -1103,7 +1088,7 @@ fn codegen_regular_intrinsic_call<'tcx>(
 
             let old = fx.bcx.ins().atomic_rmw(ty, MemFlags::trusted(), AtomicRmwOp::Nand, ptr, src);
 
-            let old = CValue::by_val(old, layout);
+            let old = CValue::by_val(old, ret.layout());
             ret.write_cvalue(fx, old);
         }
         sym::atomic_max => {

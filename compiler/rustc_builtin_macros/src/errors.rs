@@ -215,6 +215,8 @@ pub(crate) struct ConcatBytesInvalid {
     pub(crate) lit_kind: &'static str,
     #[subdiagnostic]
     pub(crate) sugg: Option<ConcatBytesInvalidSuggestion>,
+    #[note(builtin_macros_c_str_note)]
+    pub(crate) cs_note: Option<()>,
 }
 
 #[derive(Subdiagnostic)]
@@ -238,6 +240,13 @@ pub(crate) enum ConcatBytesInvalidSuggestion {
         #[primary_span]
         span: Span,
         snippet: String,
+    },
+    #[note(builtin_macros_c_str_note)]
+    #[suggestion(builtin_macros_c_str, code = "{as_bstr}", applicability = "machine-applicable")]
+    CStrLit {
+        #[primary_span]
+        span: Span,
+        as_bstr: String,
     },
     #[suggestion(
         builtin_macros_number_array,
@@ -286,27 +295,6 @@ pub(crate) struct ConcatBytesArray {
 #[derive(Diagnostic)]
 #[diag(builtin_macros_concat_bytes_bad_repeat)]
 pub(crate) struct ConcatBytesBadRepeat {
-    #[primary_span]
-    pub(crate) span: Span,
-}
-
-#[derive(Diagnostic)]
-#[diag(builtin_macros_concat_idents_missing_args)]
-pub(crate) struct ConcatIdentsMissingArgs {
-    #[primary_span]
-    pub(crate) span: Span,
-}
-
-#[derive(Diagnostic)]
-#[diag(builtin_macros_concat_idents_missing_comma)]
-pub(crate) struct ConcatIdentsMissingComma {
-    #[primary_span]
-    pub(crate) span: Span,
-}
-
-#[derive(Diagnostic)]
-#[diag(builtin_macros_concat_idents_ident_args)]
-pub(crate) struct ConcatIdentsIdentArgs {
     #[primary_span]
     pub(crate) span: Span,
 }
@@ -456,6 +444,24 @@ pub(crate) struct DefaultHasArg {
     #[primary_span]
     #[suggestion(code = "#[default]", style = "hidden", applicability = "maybe-incorrect")]
     pub(crate) span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(builtin_macros_derive_from_wrong_target)]
+#[note(builtin_macros_derive_from_usage_note)]
+pub(crate) struct DeriveFromWrongTarget<'a> {
+    #[primary_span]
+    pub(crate) span: MultiSpan,
+    pub(crate) kind: &'a str,
+}
+
+#[derive(Diagnostic)]
+#[diag(builtin_macros_derive_from_wrong_field_count)]
+#[note(builtin_macros_derive_from_usage_note)]
+pub(crate) struct DeriveFromWrongFieldCount {
+    #[primary_span]
+    pub(crate) span: MultiSpan,
+    pub(crate) multiple_fields: bool,
 }
 
 #[derive(Diagnostic)]
@@ -672,6 +678,7 @@ impl Subdiagnostic for FormatUnusedArg {
     fn add_to_diag<G: EmissionGuarantee>(self, diag: &mut Diag<'_, G>) {
         diag.arg("named", self.named);
         let msg = diag.eagerly_translate(crate::fluent_generated::builtin_macros_format_unused_arg);
+        diag.remove_arg("named");
         diag.span_label(self.span, msg);
     }
 }
@@ -917,14 +924,6 @@ pub(crate) struct TakesNoArguments<'a> {
 }
 
 #[derive(Diagnostic)]
-#[diag(builtin_macros_proc_macro_attribute_only_be_used_on_bare_functions)]
-pub(crate) struct AttributeOnlyBeUsedOnBareFunctions<'a> {
-    #[primary_span]
-    pub span: Span,
-    pub path: &'a str,
-}
-
-#[derive(Diagnostic)]
 #[diag(builtin_macros_proc_macro_attribute_only_usable_with_crate_type)]
 pub(crate) struct AttributeOnlyUsableWithCrateType<'a> {
     #[primary_span]
@@ -964,4 +963,22 @@ pub(crate) struct AsmExpectedOther {
     #[label(builtin_macros_expected_other)]
     pub(crate) span: Span,
     pub(crate) is_inline_asm: bool,
+}
+
+#[derive(Diagnostic)]
+#[diag(builtin_macros_cfg_select_no_matches)]
+pub(crate) struct CfgSelectNoMatches {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(builtin_macros_cfg_select_unreachable)]
+pub(crate) struct CfgSelectUnreachable {
+    #[primary_span]
+    #[label(builtin_macros_label2)]
+    pub span: Span,
+
+    #[label]
+    pub wildcard_span: Span,
 }
