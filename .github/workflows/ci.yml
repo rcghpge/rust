@@ -76,6 +76,13 @@ jobs:
           cd src/ci/citool
           CARGO_INCREMENTAL=0 cargo test
       - name: Calculate the CI job matrix
+        if: >
+          github.event_name == 'pull_request' ||
+          (github.repository == 'rust-lang/rust' &&
+            (startsWith(github.ref, 'refs/heads/auto') ||
+             startsWith(github.ref, 'refs/heads/try')  ||
+             startsWith(github.ref, 'refs/heads/try-perf') ||
+             startsWith(github.ref, 'refs/heads/automation/bors/try')))
         env:
           COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
