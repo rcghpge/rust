@@ -1,0 +1,90 @@
+# Potatobot placemarker for Rust source tree community development
+name: Potatobot
+
+on:
+  schedule:
+  # Thursday 6:00 PM CST (Friday 00:00 UTC)
+    - cron: '0 0 * * 5'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  sync-rust-upstream:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_TOKEN }}
+          persist-credentials: true
+
+      - name: Potatobot checkpoint
+        run: |
+          echo ".github/workflows/potatobot.yml merge=ours" >> .gitattributes
+          git add .gitattributes .github/workflows/potatobot.yml
+          git config user.name "Potatobot[bot]"
+          git config user.email "Potatobot[bot]@users.noreply.github.com"
+          git commit -m "Protect potatobot.yml [skip ci]" || true
+          git push origin HEAD || true
+
+      - name: Set Potatobot authorship
+        run: |
+          git config --global user.name "Potatobot[bot]"
+          git config --global user.email "Potatobot[bot]@users.noreply.github.com"
+          
+      - name: Add or update from source tree
+        run: |
+          if git remote get-url upstream >/dev/null 2>&1; then
+            git remote set-url upstream https://github.com/rust-lang/rust.git
+          else
+            git remote add upstream https://github.com/rust-lang/rust.git
+          fi
+          git fetch --prune origin
+          git fetch --prune upstream
+          
+      - name: Check source tree branches
+        id: branch
+        run: |
+          git remote set-head origin -a >/dev/null 2>&1 || true
+          BRANCH=$(git rev-parse --abbrev-ref origin/HEAD | sed 's|^origin/||')
+          BRANCH=${BRANCH:-main}
+          echo "target-branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "upstream-branch=main" >> "$GITHUB_OUTPUT"
+
+      - name: Sync override from source tree community development
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          if ! command -v gh >/dev/null; then
+            sudo apt update && sudo apt install -y gh
+          fi
+  
+          git fetch upstream main
+          git merge upstream/main --no-edit || (git merge --abort && exit 1)
+          
+      - name: Set branches and skip rebase after force-sync
+        run: |
+          BRANCH="${{ steps.branch.outputs.target-branch }}"
+          echo "Force-sync complete - skipping rebase (already clean)"
+          
+      - name: Push if updates from source tree
+        run: |
+          BRANCH="${{ steps.branch.outputs.target-branch }}"
+          git push origin HEAD:"$BRANCH" --force-with-lease
+          echo "Force-pushed $BRANCH from upstream."
+
+      - name: Workflow failure check
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: 'Potatobot sync failed',
+              body: 'Check latest workflow logs.'
+            })
