@@ -1,3 +1,5 @@
+[![Potatobot](https://github.com/rcghpge/rust/actions/workflows/potatobot.yml/badge.svg)](https://github.com/rcghpge/rust/actions/workflows/potatobot.yml)
+
 <div align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/rust-lang/www.rust-lang.org/master/static/images/rust-social-wide-dark.svg">
