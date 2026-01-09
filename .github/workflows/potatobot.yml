@@ -22,19 +22,14 @@ jobs:
           token: ${{ secrets.GH_TOKEN }}
           persist-credentials: true
 
-      - name: Potatobot checkpoint
+      - name: Potatobot checkpoint. Set Potatobot authorship
         run: |
           echo ".github/workflows/potatobot.yml merge=ours" >> .gitattributes
           git add .gitattributes .github/workflows/potatobot.yml
           git config user.name "Potatobot[bot]"
           git config user.email "Potatobot[bot]@users.noreply.github.com"
-          git commit -m "Protect potatobot.yml [skip ci]" || true
+          git commit -m "Potatobot checkpoint. Set configs" || true
           git push origin HEAD || true
-
-      - name: Set Potatobot authorship
-        run: |
-          git config --global user.name "Potatobot[bot]"
-          git config --global user.email "Potatobot[bot]@users.noreply.github.com"
           
       - name: Add or update from source tree
         run: |
