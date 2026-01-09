@@ -18,6 +18,5 @@ Cargo.lock linguist-generated=false
 *.woff2 binary
 
 # Potatobot for Rust
-.github/workflows/potatobot.yml merge=ours
 .gitattributes merge=ours
 .github/workflows/potatobot.yml merge=ours
