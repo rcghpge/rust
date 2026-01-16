@@ -6,7 +6,7 @@ use crate::fs::TryLockError;
 use crate::hash::Hash;
 use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut, SeekFrom};
 use crate::path::{Path, PathBuf};
-pub use crate::sys::fs::common::{Dir, remove_dir_all};
+pub use crate::sys::fs::common::{Dir, copy, remove_dir_all};
 use crate::sys::pal::{helpers, unsupported};
 use crate::sys::time::SystemTime;
 
@@ -285,11 +285,11 @@ impl File {
     }
 
     pub fn fsync(&self) -> io::Result<()> {
-        unsupported()
+        self.datasync()
     }
 
     pub fn datasync(&self) -> io::Result<()> {
-        unsupported()
+        self.0.flush()
     }
 
     pub fn lock(&self) -> io::Result<()> {
@@ -320,8 +320,8 @@ impl File {
         self.0.set_file_info(file_info)
     }
 
-    pub fn read(&self, _buf: &mut [u8]) -> io::Result<usize> {
-        unsupported()
+    pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.read(buf)
     }
 
     pub fn read_vectored(&self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
@@ -336,8 +336,8 @@ impl File {
         crate::io::default_read_buf(|buf| self.read(buf), cursor)
     }
 
-    pub fn write(&self, _buf: &[u8]) -> io::Result<usize> {
-        unsupported()
+    pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
+        self.0.write(buf)
     }
 
     pub fn write_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
@@ -348,12 +348,29 @@ impl File {
         false
     }
 
+    // Write::flush is only meant for buffered writers. So should be noop for unbuffered files.
     pub fn flush(&self) -> io::Result<()> {
-        unsupported()
+        Ok(())
     }
 
-    pub fn seek(&self, _pos: SeekFrom) -> io::Result<u64> {
-        unsupported()
+    pub fn seek(&self, pos: SeekFrom) -> io::Result<u64> {
+        const NEG_OFF_ERR: io::Error =
+            io::const_error!(io::ErrorKind::InvalidInput, "cannot seek to negative offset.");
+
+        let off = match pos {
+            SeekFrom::Start(p) => p,
+            SeekFrom::End(p) => {
+                // Seeking to position 0xFFFFFFFFFFFFFFFF causes the current position to be set to the end of the file.
+                if p == 0 {
+                    0xFFFFFFFFFFFFFFFF
+                } else {
+                    self.file_attr()?.size().checked_add_signed(p).ok_or(NEG_OFF_ERR)?
+                }
+            }
+            SeekFrom::Current(p) => self.tell()?.checked_add_signed(p).ok_or(NEG_OFF_ERR)?,
+        };
+
+        self.0.set_position(off).map(|_| off)
     }
 
     pub fn size(&self) -> Option<io::Result<u64>> {
@@ -364,7 +381,7 @@ impl File {
     }
 
     pub fn tell(&self) -> io::Result<u64> {
-        unsupported()
+        self.0.position()
     }
 
     pub fn duplicate(&self) -> io::Result<File> {
@@ -524,10 +541,6 @@ pub fn canonicalize(p: &Path) -> io::Result<PathBuf> {
     crate::path::absolute(p)
 }
 
-pub fn copy(_from: &Path, _to: &Path) -> io::Result<u64> {
-    unsupported()
-}
-
 fn set_perm_inner(f: &uefi_fs::File, perm: FilePermissions) -> io::Result<()> {
     let mut file_info = f.file_info()?;
 
@@ -666,6 +679,19 @@ mod uefi_fs {
             Ok(p)
         }
 
+        pub(crate) fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
+            let file_ptr = self.protocol.as_ptr();
+            let mut buf_size = buf.len();
+
+            let r = unsafe { ((*file_ptr).read)(file_ptr, &mut buf_size, buf.as_mut_ptr().cast()) };
+
+            if buf_size == 0 && r.is_error() {
+                Err(io::Error::from_raw_os_error(r.as_usize()))
+            } else {
+                Ok(buf_size)
+            }
+        }
+
         pub(crate) fn read_dir_entry(&self) -> io::Result<Option<UefiBox<file::Info>>> {
             let file_ptr = self.protocol.as_ptr();
             let mut buf_size = 0;
@@ -689,6 +715,25 @@ mod uefi_fs {
                 Err(io::Error::from_raw_os_error(r.as_usize()))
             } else {
                 Ok(Some(info))
+            }
+        }
+
+        pub(crate) fn write(&self, buf: &[u8]) -> io::Result<usize> {
+            let file_ptr = self.protocol.as_ptr();
+            let mut buf_size = buf.len();
+
+            let r = unsafe {
+                ((*file_ptr).write)(
+                    file_ptr,
+                    &mut buf_size,
+                    buf.as_ptr().cast::<crate::ffi::c_void>().cast_mut(),
+                )
+            };
+
+            if buf_size == 0 && r.is_error() {
+                Err(io::Error::from_raw_os_error(r.as_usize()))
+            } else {
+                Ok(buf_size)
             }
         }
 
@@ -734,6 +779,20 @@ mod uefi_fs {
             if r.is_error() { Err(io::Error::from_raw_os_error(r.as_usize())) } else { Ok(()) }
         }
 
+        pub(crate) fn position(&self) -> io::Result<u64> {
+            let file_ptr = self.protocol.as_ptr();
+            let mut pos = 0;
+
+            let r = unsafe { ((*file_ptr).get_position)(file_ptr, &mut pos) };
+            if r.is_error() { Err(io::Error::from_raw_os_error(r.as_usize())) } else { Ok(pos) }
+        }
+
+        pub(crate) fn set_position(&self, pos: u64) -> io::Result<()> {
+            let file_ptr = self.protocol.as_ptr();
+            let r = unsafe { ((*file_ptr).set_position)(file_ptr, pos) };
+            if r.is_error() { Err(io::Error::from_raw_os_error(r.as_usize())) } else { Ok(()) }
+        }
+
         pub(crate) fn delete(self) -> io::Result<()> {
             let file_ptr = self.protocol.as_ptr();
             let r = unsafe { ((*file_ptr).delete)(file_ptr) };
@@ -741,6 +800,12 @@ mod uefi_fs {
             // Spec states that even in case of failure, the file handle will be closed.
             crate::mem::forget(self);
 
+            if r.is_error() { Err(io::Error::from_raw_os_error(r.as_usize())) } else { Ok(()) }
+        }
+
+        pub(crate) fn flush(&self) -> io::Result<()> {
+            let file_ptr = self.protocol.as_ptr();
+            let r = unsafe { ((*file_ptr).flush)(file_ptr) };
             if r.is_error() { Err(io::Error::from_raw_os_error(r.as_usize())) } else { Ok(()) }
         }
 
