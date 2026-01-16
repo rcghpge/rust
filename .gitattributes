@@ -20,3 +20,4 @@ Cargo.lock linguist-generated=false
 # Potatobot for Rust
 .gitattributes merge=ours
 .github/workflows/potatobot.yml merge=ours
+.github/workflows/potatobot.yml merge=ours
