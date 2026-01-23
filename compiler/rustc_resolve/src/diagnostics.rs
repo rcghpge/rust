@@ -1614,6 +1614,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
             }
         }
 
+        suggestions.retain(|suggestion| suggestion.is_stable || self.tcx.sess.is_nightly_build());
         suggestions
     }
 
@@ -2064,9 +2065,24 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
         };
         let (b1_note, b1_help_msgs) = could_refer_to(b1, scope1, "");
         let (b2_note, b2_help_msgs) = could_refer_to(b2, scope2, " also");
+        let help = if kind == AmbiguityKind::GlobVsGlob
+            && b1
+                .parent_module
+                .and_then(|m| m.opt_def_id())
+                .map(|d| !d.is_local())
+                .unwrap_or_default()
+        {
+            Some(&[
+                "consider updating this dependency to resolve this error",
+                "if updating the dependency does not resolve the problem report the problem to the author of the relevant crate",
+            ] as &[_])
+        } else {
+            None
+        };
 
         errors::Ambiguity {
             ident,
+            help,
             kind: kind.descr(),
             b1_note,
             b1_help_msgs,
