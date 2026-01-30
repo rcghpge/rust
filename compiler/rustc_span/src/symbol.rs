@@ -3,7 +3,6 @@
 //! type, and vice versa.
 
 use std::hash::{Hash, Hasher};
-use std::ops::Deref;
 use std::{fmt, str};
 
 use rustc_arena::DroplessArena;
@@ -186,6 +185,7 @@ symbols! {
         AtomicU64,
         AtomicU128,
         AtomicUsize,
+        AutoTrait,
         BTreeEntry,
         BTreeMap,
         BTreeSet,
@@ -231,6 +231,7 @@ symbols! {
         Display,
         DoubleEndedIterator,
         Duration,
+        DynTrait,
         Encodable,
         Encoder,
         Enumerate,
@@ -270,6 +271,7 @@ symbols! {
         Into,
         IntoFuture,
         IntoIterator,
+        IntoIteratorItem,
         IoBufRead,
         IoLines,
         IoRead,
@@ -731,6 +733,7 @@ symbols! {
         console,
         const_allocate,
         const_async_blocks,
+        const_block_items,
         const_closures,
         const_compare_raw_pointers,
         const_constructor,
@@ -1295,6 +1298,7 @@ symbols! {
         io_stdout,
         irrefutable_let_patterns,
         is,
+        is_auto,
         is_val_statically_known,
         isa_attribute,
         isize,
@@ -1748,6 +1752,7 @@ symbols! {
         precise_capturing_in_traits,
         precise_pointer_size_matching,
         precision,
+        predicates,
         pref_align_of,
         prefetch_read_data,
         prefetch_read_instruction,
@@ -1917,6 +1922,7 @@ symbols! {
         rust_future,
         rust_logo,
         rust_out,
+        rust_preserve_none_cc,
         rustc,
         rustc_abi,
         // FIXME(#82232, #143834): temporary name to mitigate `#[align]` nameres ambiguity
@@ -2140,6 +2146,7 @@ symbols! {
         simd_shr,
         simd_shuffle,
         simd_shuffle_const_generic,
+        simd_splat,
         simd_sub,
         simd_trunc,
         simd_with_exposed_provenance,
@@ -2293,6 +2300,7 @@ symbols! {
         trace_macros,
         track_caller,
         trait_alias,
+        trait_ty,
         trait_upcasting,
         transmute,
         transmute_generic_consts,
@@ -2744,7 +2752,7 @@ impl fmt::Display for IdentPrinter {
     }
 }
 
-/// An newtype around `Ident` that calls [Ident::normalize_to_macro_rules] on
+/// A newtype around `Ident` that calls [Ident::normalize_to_macro_rules] on
 /// construction for "local variable hygiene" comparisons.
 ///
 /// Use this type when you need to compare identifiers according to macro_rules hygiene.
@@ -2768,48 +2776,6 @@ impl fmt::Debug for MacroRulesNormalizedIdent {
 impl fmt::Display for MacroRulesNormalizedIdent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&self.0, f)
-    }
-}
-
-/// An newtype around `Ident` that calls [Ident::normalize_to_macros_2_0] on
-/// construction for "item hygiene" comparisons.
-///
-/// Identifiers with same string value become same if they came from the same macro 2.0 macro
-/// (e.g., `macro` item, but not `macro_rules` item) and stay different if they came from
-/// different macro 2.0 macros.
-#[derive(Copy, Clone, Eq, PartialEq, Hash)]
-pub struct Macros20NormalizedIdent(pub Ident);
-
-impl Macros20NormalizedIdent {
-    #[inline]
-    pub fn new(ident: Ident) -> Self {
-        Macros20NormalizedIdent(ident.normalize_to_macros_2_0())
-    }
-
-    // dummy_span does not need to be normalized, so we can use `Ident` directly
-    pub fn with_dummy_span(name: Symbol) -> Self {
-        Macros20NormalizedIdent(Ident::with_dummy_span(name))
-    }
-}
-
-impl fmt::Debug for Macros20NormalizedIdent {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(&self.0, f)
-    }
-}
-
-impl fmt::Display for Macros20NormalizedIdent {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&self.0, f)
-    }
-}
-
-/// By impl Deref, we can access the wrapped Ident as if it were a normal Ident
-/// such as `norm_ident.name` instead of `norm_ident.0.name`.
-impl Deref for Macros20NormalizedIdent {
-    type Target = Ident;
-    fn deref(&self) -> &Self::Target {
-        &self.0
     }
 }
 
