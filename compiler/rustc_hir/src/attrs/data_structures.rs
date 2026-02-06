@@ -331,6 +331,8 @@ pub enum NativeLibKind {
         bundle: Option<bool>,
         /// Whether to link static library without throwing any object files away
         whole_archive: Option<bool>,
+        /// Whether to export c static library symbols
+        export_symbols: Option<bool>,
     },
     /// Dynamic library (e.g. `libfoo.so` on Linux)
     /// or an import library corresponding to a dynamic library (e.g. `foo.lib` on Windows/MSVC).
@@ -363,8 +365,8 @@ pub enum NativeLibKind {
 impl NativeLibKind {
     pub fn has_modifiers(&self) -> bool {
         match self {
-            NativeLibKind::Static { bundle, whole_archive } => {
-                bundle.is_some() || whole_archive.is_some()
+            NativeLibKind::Static { bundle, whole_archive, export_symbols } => {
+                bundle.is_some() || whole_archive.is_some() || export_symbols.is_some()
             }
             NativeLibKind::Dylib { as_needed }
             | NativeLibKind::Framework { as_needed }
@@ -690,6 +692,47 @@ impl IntoDiagArg for CrateType {
     }
 }
 
+#[derive(Clone, Debug, HashStable_Generic, Encodable, Decodable, PrintAttribute)]
+pub enum RustcLayoutType {
+    Abi,
+    Align,
+    Size,
+    HomogenousAggregate,
+    Debug,
+}
+
+#[derive(Clone, Debug, HashStable_Generic, Encodable, Decodable, PrintAttribute, PartialEq, Eq)]
+pub enum RustcMirKind {
+    PeekMaybeInit,
+    PeekMaybeUninit,
+    PeekLiveness,
+    StopAfterDataflow,
+    BorrowckGraphvizPostflow { path: PathBuf },
+    BorrowckGraphvizFormat { format: BorrowckGraphvizFormatKind },
+}
+
+#[derive(Clone, Debug, HashStable_Generic, Encodable, Decodable, PrintAttribute, PartialEq, Eq)]
+pub enum BorrowckGraphvizFormatKind {
+    TwoPhase,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(HashStable_Generic, Encodable, Decodable, PrintAttribute)]
+pub struct RustcCleanAttribute {
+    pub span: Span,
+    pub cfg: Symbol,
+    pub except: Option<RustcCleanQueries>,
+    pub loaded_from_disk: Option<RustcCleanQueries>,
+}
+
+/// Represents the `except=` or `loaded_from_disk=` argument of `#[rustc_clean]`
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(HashStable_Generic, Encodable, Decodable, PrintAttribute)]
+pub struct RustcCleanQueries {
+    pub entries: ThinVec<Symbol>,
+    pub span: Span,
+}
+
 /// Represents parsed *built-in* inert attributes.
 ///
 /// ## Overview
@@ -966,6 +1009,9 @@ pub enum AttributeKind {
     /// Represents [`#[recursion_limit]`](https://doc.rust-lang.org/reference/attributes/limits.html#the-recursion_limit-attribute)
     RecursionLimit { attr_span: Span, limit_span: Span, limit: Limit },
 
+    /// Represents `#[reexport_test_harness_main]`
+    ReexportTestHarnessMain(Symbol),
+
     /// Represents [`#[repr]`](https://doc.rust-lang.org/stable/reference/type-layout.html#representations).
     Repr { reprs: ThinVec<(ReprAttr, Span)>, first_span: Span },
 
@@ -995,6 +1041,9 @@ pub enum AttributeKind {
     },
     /// Represents `#[rustc_builtin_macro]`.
     RustcBuiltinMacro { builtin_name: Option<Symbol>, helper_attrs: ThinVec<Symbol>, span: Span },
+
+    /// Represents `#[rustc_clean]`
+    RustcClean(ThinVec<RustcCleanAttribute>),
 
     /// Represents `#[rustc_coherence_is_core]`
     RustcCoherenceIsCore(Span),
@@ -1048,6 +1097,15 @@ pub enum AttributeKind {
     /// Represents `#[rustc_has_incoherent_inherent_impls]`
     RustcHasIncoherentInherentImpls,
 
+    /// Represents `#[rustc_hidden_type_of_opaques]`
+    RustcHiddenTypeOfOpaques,
+
+    /// Represents `#[rustc_if_this_changed]`
+    RustcIfThisChanged(Span, Option<Symbol>),
+
+    /// Represents `#[rustc_layout]`
+    RustcLayout(ThinVec<RustcLayoutType>),
+
     /// Represents `#[rustc_layout_scalar_valid_range_end]`.
     RustcLayoutScalarValidRangeEnd(Box<u128>, Span),
 
@@ -1075,6 +1133,9 @@ pub enum AttributeKind {
     /// Represents `#[rustc_main]`.
     RustcMain,
 
+    /// Represents `#[rustc_mir]`.
+    RustcMir(ThinVec<RustcMirKind>),
+
     /// Represents `#[rustc_must_implement_one_of]`
     RustcMustImplementOneOf { attr_span: Span, fn_names: ThinVec<Ident> },
 
@@ -1083,6 +1144,9 @@ pub enum AttributeKind {
 
     /// Represents `#[rustc_no_implicit_autorefs]`
     RustcNoImplicitAutorefs,
+
+    /// Represents `#[rustc_non_const_trait_method]`.
+    RustcNonConstTraitMethod,
 
     /// Represents `#[rustc_nounwind]`
     RustcNounwind,
@@ -1107,6 +1171,9 @@ pub enum AttributeKind {
 
     /// Represents `#[rustc_pass_indirectly_in_non_rustic_abis]`
     RustcPassIndirectlyInNonRusticAbis(Span),
+
+    /// Represents `#[rustc_preserve_ub_checks]`
+    RustcPreserveUbChecks,
 
     /// Represents `#[rustc_pub_transparent]` (used by the `repr_transparent_external_private_fields` lint).
     RustcPubTransparent(Span),
@@ -1136,6 +1203,9 @@ pub enum AttributeKind {
 
     /// Represents `#[rustc_std_internal_symbol]`.
     RustcStdInternalSymbol(Span),
+
+    /// Represents `#[rustc_then_this_would_need]`
+    RustcThenThisWouldNeed(Span, ThinVec<Ident>),
 
     /// Represents `#[rustc_unsafe_specialization_marker]`.
     RustcUnsafeSpecializationMarker(Span),
