@@ -10,10 +10,9 @@ use rustc_attr_parsing::{AttributeParser, Early, ShouldEmit};
 use rustc_codegen_ssa::traits::CodegenBackend;
 use rustc_codegen_ssa::{CodegenResults, CrateInfo};
 use rustc_data_structures::indexmap::IndexMap;
-use rustc_data_structures::jobserver::Proxy;
 use rustc_data_structures::steal::Steal;
-use rustc_data_structures::sync::{AppendOnlyIndexVec, FreezeLock, WorkerLocal};
-use rustc_data_structures::{parallel, thousands};
+use rustc_data_structures::sync::{AppendOnlyIndexVec, FreezeLock, WorkerLocal, par_fns};
+use rustc_data_structures::thousands;
 use rustc_errors::timings::TimingSection;
 use rustc_expand::base::{ExtCtxt, LintStoreExpand};
 use rustc_feature::Features;
@@ -28,7 +27,7 @@ use rustc_lint::{BufferedEarlyLint, EarlyCheckNode, LintStore, unerased_lint_sto
 use rustc_metadata::EncodedMetadata;
 use rustc_metadata::creader::CStore;
 use rustc_middle::arena::Arena;
-use rustc_middle::ty::{self, CurrentGcx, GlobalCtxt, RegisteredTools, TyCtxt};
+use rustc_middle::ty::{self, RegisteredTools, TyCtxt};
 use rustc_middle::util::Providers;
 use rustc_parse::lexer::StripTokens;
 use rustc_parse::{new_parser_from_file, new_parser_from_source_str, unwrap_or_emit_fatal};
@@ -969,68 +968,45 @@ pub fn create_and_enter_global_ctxt<T, F: for<'tcx> FnOnce(TyCtxt<'tcx>) -> T>(
     let arena = WorkerLocal::new(|_| Arena::default());
     let hir_arena = WorkerLocal::new(|_| rustc_hir::Arena::default());
 
-    // This closure is necessary to force rustc to perform the correct lifetime
-    // subtyping for GlobalCtxt::enter to be allowed.
-    let inner: Box<
-        dyn for<'tcx> FnOnce(
-            &'tcx Session,
-            CurrentGcx,
-            Arc<Proxy>,
-            &'tcx OnceLock<GlobalCtxt<'tcx>>,
-            &'tcx WorkerLocal<Arena<'tcx>>,
-            &'tcx WorkerLocal<rustc_hir::Arena<'tcx>>,
-            F,
-        ) -> T,
-    > = Box::new(move |sess, current_gcx, jobserver_proxy, gcx_cell, arena, hir_arena, f| {
-        TyCtxt::create_global_ctxt(
-            gcx_cell,
-            sess,
-            crate_types,
-            stable_crate_id,
-            arena,
-            hir_arena,
-            untracked,
-            dep_graph,
-            rustc_query_impl::make_dep_kind_vtables(arena),
-            rustc_query_impl::query_system(
-                providers.queries,
-                providers.extern_queries,
-                query_result_on_disk_cache,
-                incremental,
-            ),
-            providers.hooks,
-            current_gcx,
-            jobserver_proxy,
-            |tcx| {
-                let feed = tcx.create_crate_num(stable_crate_id).unwrap();
-                assert_eq!(feed.key(), LOCAL_CRATE);
-                feed.crate_name(crate_name);
-
-                let feed = tcx.feed_unit_query();
-                feed.features_query(tcx.arena.alloc(rustc_expand::config::features(
-                    tcx.sess,
-                    &pre_configured_attrs,
-                    crate_name,
-                )));
-                feed.crate_for_resolver(tcx.arena.alloc(Steal::new((krate, pre_configured_attrs))));
-                feed.output_filenames(Arc::new(outputs));
-
-                let res = f(tcx);
-                // FIXME maybe run finish even when a fatal error occurred? or at least tcx.alloc_self_profile_query_strings()?
-                tcx.finish();
-                res
-            },
-        )
-    });
-
-    inner(
-        &compiler.sess,
-        compiler.current_gcx.clone(),
-        Arc::clone(&compiler.jobserver_proxy),
+    TyCtxt::create_global_ctxt(
         &gcx_cell,
+        &compiler.sess,
+        crate_types,
+        stable_crate_id,
         &arena,
         &hir_arena,
-        f,
+        untracked,
+        dep_graph,
+        rustc_query_impl::make_dep_kind_vtables(&arena),
+        rustc_query_impl::query_system(
+            providers.queries,
+            providers.extern_queries,
+            query_result_on_disk_cache,
+            incremental,
+        ),
+        providers.hooks,
+        compiler.current_gcx.clone(),
+        Arc::clone(&compiler.jobserver_proxy),
+        |tcx| {
+            let feed = tcx.create_crate_num(stable_crate_id).unwrap();
+            assert_eq!(feed.key(), LOCAL_CRATE);
+            feed.crate_name(crate_name);
+
+            let feed = tcx.feed_unit_query();
+            feed.features_query(tcx.arena.alloc(rustc_expand::config::features(
+                tcx.sess,
+                &pre_configured_attrs,
+                crate_name,
+            )));
+            feed.crate_for_resolver(tcx.arena.alloc(Steal::new((krate, pre_configured_attrs))));
+            feed.output_filenames(Arc::new(outputs));
+
+            let res = f(tcx);
+            // FIXME maybe run finish even when a fatal error occurred? or at least
+            // tcx.alloc_self_profile_query_strings()?
+            tcx.finish();
+            res
+        },
     )
 }
 
@@ -1052,8 +1028,8 @@ fn run_required_analyses(tcx: TyCtxt<'_>) {
 
     let sess = tcx.sess;
     sess.time("misc_checking_1", || {
-        parallel!(
-            {
+        par_fns(&mut [
+            &mut || {
                 sess.time("looking_for_entry_point", || tcx.ensure_ok().entry_fn(()));
                 sess.time("check_externally_implementable_items", || {
                     tcx.ensure_ok().check_externally_implementable_items(())
@@ -1065,7 +1041,7 @@ fn run_required_analyses(tcx: TyCtxt<'_>) {
 
                 CStore::from_tcx(tcx).report_unused_deps(tcx);
             },
-            {
+            &mut || {
                 tcx.ensure_ok().exportable_items(LOCAL_CRATE);
                 tcx.ensure_ok().stable_order_of_exportable_impls(LOCAL_CRATE);
                 tcx.par_hir_for_each_module(|module| {
@@ -1073,14 +1049,14 @@ fn run_required_analyses(tcx: TyCtxt<'_>) {
                     tcx.ensure_ok().check_mod_unstable_api_usage(module);
                 });
             },
-            {
+            &mut || {
                 // We force these queries to run,
                 // since they might not otherwise get called.
                 // This marks the corresponding crate-level attributes
                 // as used, and ensures that their values are valid.
                 tcx.ensure_ok().limits(());
-            }
-        );
+            },
+        ]);
     });
 
     rustc_hir_analysis::check_crate(tcx);
@@ -1152,39 +1128,39 @@ fn analysis(tcx: TyCtxt<'_>, (): ()) {
     }
 
     sess.time("misc_checking_3", || {
-        parallel!(
-            {
+        par_fns(&mut [
+            &mut || {
                 tcx.ensure_ok().effective_visibilities(());
 
-                parallel!(
-                    {
+                par_fns(&mut [
+                    &mut || {
                         tcx.par_hir_for_each_module(|module| {
                             tcx.ensure_ok().check_private_in_public(module)
                         })
                     },
-                    {
+                    &mut || {
                         tcx.par_hir_for_each_module(|module| {
                             tcx.ensure_ok().check_mod_deathness(module)
                         });
                     },
-                    {
+                    &mut || {
                         sess.time("lint_checking", || {
                             rustc_lint::check_crate(tcx);
                         });
                     },
-                    {
+                    &mut || {
                         tcx.ensure_ok().clashing_extern_declarations(());
-                    }
-                );
+                    },
+                ]);
             },
-            {
+            &mut || {
                 sess.time("privacy_checking_modules", || {
                     tcx.par_hir_for_each_module(|module| {
                         tcx.ensure_ok().check_mod_privacy(module);
                     });
                 });
-            }
-        );
+            },
+        ]);
 
         // This check has to be run after all lints are done processing. We don't
         // define a lint filter, as all lint checks should have finished at this point.

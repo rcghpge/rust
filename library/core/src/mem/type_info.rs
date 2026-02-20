@@ -2,7 +2,7 @@
 //! runtime or const-eval processable way.
 
 use crate::any::TypeId;
-use crate::intrinsics::type_of;
+use crate::intrinsics::{type_id, type_of};
 
 /// Compile-time type information.
 #[derive(Debug)]
@@ -28,11 +28,17 @@ impl TypeId {
 
 impl Type {
     /// Returns the type information of the generic type parameter.
+    ///
+    /// Note: Unlike `TypeId`s obtained via `TypeId::of`, the `Type`
+    /// struct and its fields contain `TypeId`s that are not necessarily
+    /// derived from types that outlive `'static`. This means that using
+    /// the `TypeId`s (transitively) obtained from this function will
+    /// be able to break invariants that other `TypeId` consuming crates
+    /// may have assumed to hold.
     #[unstable(feature = "type_info", issue = "146922")]
     #[rustc_const_unstable(feature = "type_info", issue = "146922")]
-    // FIXME(reflection): don't require the 'static bound
-    pub const fn of<T: ?Sized + 'static>() -> Self {
-        const { TypeId::of::<T>().info() }
+    pub const fn of<T: ?Sized>() -> Self {
+        const { type_id::<T>().info() }
     }
 }
 
@@ -69,6 +75,8 @@ pub enum TypeKind {
     Reference(Reference),
     /// Pointers.
     Pointer(Pointer),
+    /// Function pointers.
+    FnPtr(FnPtr),
     /// FIXME(#146922): add all the common types
     Other,
 }
@@ -298,4 +306,40 @@ pub struct Pointer {
     pub pointee: TypeId,
     /// Whether this pointer is mutable or not.
     pub mutable: bool,
+}
+
+#[derive(Debug)]
+#[unstable(feature = "type_info", issue = "146922")]
+/// Function pointer, e.g. fn(u8),
+pub struct FnPtr {
+    /// Unsafety, true is unsafe
+    pub unsafety: bool,
+
+    /// Abi, e.g. extern "C"
+    pub abi: Abi,
+
+    /// Function inputs
+    pub inputs: &'static [TypeId],
+
+    /// Function return type, default is TypeId::of::<()>
+    pub output: TypeId,
+
+    /// Vardiadic function, e.g. extern "C" fn add(n: usize, mut args: ...);
+    pub variadic: bool,
+}
+
+#[derive(Debug, Default)]
+#[non_exhaustive]
+#[unstable(feature = "type_info", issue = "146922")]
+/// Abi of [FnPtr]
+pub enum Abi {
+    /// Named abi, e.g. extern "custom", "stdcall" etc.
+    Named(&'static str),
+
+    /// Default
+    #[default]
+    ExternRust,
+
+    /// C-calling convention
+    ExternC,
 }

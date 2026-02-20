@@ -445,7 +445,7 @@ macro_rules! matches {
 /// [raw-identifier syntax][ris]: `r#try`.
 ///
 /// [propagating-errors]: https://doc.rust-lang.org/book/ch09-02-recoverable-errors-with-result.html#a-shortcut-for-propagating-errors-the--operator
-/// [ris]: https://doc.rust-lang.org/nightly/rust-by-example/compatibility/raw_identifiers.html
+/// [ris]: ../rust-by-example/compatibility/raw_identifiers.html
 ///
 /// `try!` matches the given [`Result`]. In case of the `Ok` variant, the
 /// expression has the value of the wrapped value.
@@ -607,6 +607,9 @@ macro_rules! write {
     ($dst:expr, $($arg:tt)*) => {
         $dst.write_fmt($crate::format_args!($($arg)*))
     };
+    ($($arg:tt)*) => {
+        compile_error!("requires a destination and format arguments, like `write!(dest, \"format string\", args...)`")
+    };
 }
 
 /// Writes formatted data into a buffer, with a newline appended.
@@ -644,6 +647,9 @@ macro_rules! writeln {
     };
     ($dst:expr, $($arg:tt)*) => {
         $dst.write_fmt($crate::format_args_nl!($($arg)*))
+    };
+    ($($arg:tt)*) => {
+        compile_error!("requires a destination and format arguments, like `writeln!(dest, \"format string\", args...)`")
     };
 }
 
@@ -1777,7 +1783,7 @@ pub(crate) mod builtin {
     ///
     /// See also [`std::alloc::GlobalAlloc`](../../../std/alloc/trait.GlobalAlloc.html).
     #[stable(feature = "global_allocator", since = "1.28.0")]
-    #[allow_internal_unstable(rustc_attrs)]
+    #[allow_internal_unstable(rustc_attrs, ptr_alignment_type)]
     #[rustc_builtin_macro]
     pub macro global_allocator($item:item) {
         /* compiler built-in */

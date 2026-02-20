@@ -157,6 +157,7 @@ symbols! {
         Abi,
         AcqRel,
         Acquire,
+        Alignment,
         Any,
         Arc,
         ArcWeak,
@@ -241,6 +242,8 @@ symbols! {
         Equal,
         Err,
         Error,
+        ExternC,
+        ExternRust,
         File,
         FileType,
         Float,
@@ -249,6 +252,7 @@ symbols! {
         Fn,
         FnMut,
         FnOnce,
+        FnPtr,
         Formatter,
         Forward,
         From,
@@ -302,6 +306,7 @@ symbols! {
         Mutex,
         MutexGuard,
         N,
+        Named,
         NonNull,
         NonZero,
         None,
@@ -326,7 +331,6 @@ symbols! {
         Pointer,
         Poll,
         ProcMacro,
-        ProceduralMasqueradeDummyType,
         Range,
         RangeBounds,
         RangeCopy,
@@ -648,6 +652,7 @@ symbols! {
         caller_location,
         capture_disjoint_fields,
         carrying_mul_add,
+        carryless_mul,
         catch_unwind,
         cause,
         cdylib,
@@ -740,6 +745,7 @@ symbols! {
         const_allocate,
         const_async_blocks,
         const_block_items,
+        const_c_variadic,
         const_closures,
         const_compare_raw_pointers,
         const_constructor,
@@ -988,7 +994,6 @@ symbols! {
         exact_div,
         except,
         exception_handling: "exception-handling",
-        exchange_malloc,
         exclusive_range_pattern,
         exhaustive_integer_patterns,
         exhaustive_patterns,
@@ -1094,6 +1099,7 @@ symbols! {
         fields,
         file,
         file_options,
+        final_associated_functions,
         flags,
         float,
         float_to_int_unchecked,
@@ -1147,6 +1153,7 @@ symbols! {
         from_output,
         from_residual,
         from_size_align_unchecked,
+        from_size_alignment_unchecked,
         from_str,
         from_str_method,
         from_str_nonconst,
@@ -1287,6 +1294,7 @@ symbols! {
         inline_const,
         inline_const_pat,
         inout,
+        inputs,
         instant_now,
         instruction_set,
         integer_: "integer", // underscore to avoid clashing with the function `sym::integer` below
@@ -1657,6 +1665,7 @@ symbols! {
         os_string_as_os_str,
         other,
         out,
+        output,
         overflow_checks,
         overlapping_marker_traits,
         owned_box,
@@ -2093,6 +2102,7 @@ symbols! {
         simd_bitmask,
         simd_bitreverse,
         simd_bswap,
+        simd_carryless_mul,
         simd_cast,
         simd_cast_ptr,
         simd_ceil,
@@ -2178,7 +2188,6 @@ symbols! {
         slice_from_raw_parts_mut,
         slice_from_ref,
         slice_get_unchecked,
-        slice_into_vec,
         slice_iter,
         slice_len_fn,
         slice_patterns,
@@ -2436,6 +2445,7 @@ symbols! {
         unsafe_no_drop_flag,
         unsafe_pinned,
         unsafe_unpin,
+        unsafety,
         unsize,
         unsized_const_param_ty,
         unsized_const_params,
@@ -2480,6 +2490,7 @@ symbols! {
         value,
         values,
         var,
+        variadic,
         variant_count,
         variants,
         vec,
@@ -2537,6 +2548,7 @@ symbols! {
         wrapping_rem_euclid,
         wrapping_sub,
         wreg,
+        write_box_via_move,
         write_bytes,
         write_fmt,
         write_macro,
@@ -2775,6 +2787,14 @@ impl MacroRulesNormalizedIdent {
     #[inline]
     pub fn new(ident: Ident) -> Self {
         MacroRulesNormalizedIdent(ident.normalize_to_macro_rules())
+    }
+
+    pub fn symbol(&self) -> Symbol {
+        self.0.name
+    }
+
+    pub fn ident(&self) -> Ident {
+        self.0
     }
 }
 

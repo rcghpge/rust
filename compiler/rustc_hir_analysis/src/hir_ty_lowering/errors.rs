@@ -3,8 +3,8 @@ use rustc_data_structures::sorted_map::SortedMap;
 use rustc_data_structures::unord::UnordMap;
 use rustc_errors::codes::*;
 use rustc_errors::{
-    Applicability, Diag, ErrorGuaranteed, MultiSpan, SuggestionStyle, inline_fluent, listify,
-    pluralize, struct_span_code_err,
+    Applicability, Diag, ErrorGuaranteed, MultiSpan, SuggestionStyle, listify, msg, pluralize,
+    struct_span_code_err,
 };
 use rustc_hir::def::{CtorOf, DefKind, Res};
 use rustc_hir::def_id::DefId;
@@ -304,7 +304,7 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                             // was also not an exact match, so we also suggest changing it.
                             err.span_suggestion_verbose(
                                 assoc_ident.span,
-                                inline_fluent!("...and changing the associated {$assoc_kind} name"),
+                                msg!("...and changing the associated {$assoc_kind} name"),
                                 suggested_name,
                                 Applicability::MaybeIncorrect,
                             );
@@ -528,7 +528,7 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                         }
                     }
                 }
-                err.multipart_suggestion_verbose(
+                err.multipart_suggestion(
                     "there is a variant with a similar name",
                     suggestion,
                     Applicability::HasPlaceholders,
@@ -1546,7 +1546,7 @@ pub fn prohibit_assoc_item_constraint(
                             (constraint.span.with_lo(constraint.ident.span.hi()), String::new()),
                         ];
 
-                        err.multipart_suggestion_verbose(
+                        err.multipart_suggestion(
                             "declare the type parameter right after the `impl` keyword",
                             suggestions,
                             Applicability::MaybeIncorrect,
@@ -1721,7 +1721,7 @@ fn generics_args_err_extend<'a>(
                 },
                 (args_span, String::new()),
             ];
-            err.multipart_suggestion_verbose(msg, suggestion, Applicability::MaybeIncorrect);
+            err.multipart_suggestion(msg, suggestion, Applicability::MaybeIncorrect);
         }
         GenericsArgsErrExtend::DefVariant(segments) => {
             let args: Vec<Span> = segments

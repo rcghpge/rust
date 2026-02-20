@@ -289,7 +289,6 @@
 #![feature(ffi_const)]
 #![feature(formatting_options)]
 #![feature(funnel_shifts)]
-#![feature(if_let_guard)]
 #![feature(intra_doc_pointers)]
 #![feature(iter_advance_by)]
 #![feature(iter_next_chunk)]
@@ -315,6 +314,7 @@
 #![feature(try_blocks)]
 #![feature(try_trait_v2)]
 #![feature(type_alias_impl_trait)]
+#![feature(uint_carryless_mul)]
 // tidy-alphabetical-end
 //
 // Library features (core):
