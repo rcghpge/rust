@@ -249,22 +249,6 @@ pub(crate) struct UnreachableLabelWithSimilarNameExists {
 }
 
 #[derive(Diagnostic)]
-#[diag("`self` import can only appear once in an import list", code = E0430)]
-pub(crate) struct SelfImportCanOnlyAppearOnceInTheList {
-    #[primary_span]
-    #[label("can only appear once in an import list")]
-    pub(crate) span: Span,
-}
-
-#[derive(Diagnostic)]
-#[diag("`self` import can only appear in an import list with a non-empty prefix", code = E0431)]
-pub(crate) struct SelfImportOnlyInImportListWithNonEmptyPrefix {
-    #[primary_span]
-    #[label("can only appear in an import list with a non-empty prefix")]
-    pub(crate) span: Span,
-}
-
-#[derive(Diagnostic)]
 #[diag("can't capture dynamic environment in a fn item", code = E0434)]
 #[help("use the `|| {\"{\"} ... {\"}\"}` closure form instead")]
 pub(crate) struct CannotCaptureDynamicEnvironmentInFnItem {
@@ -421,7 +405,12 @@ pub(crate) struct SelfInConstGenericTy {
 }
 
 #[derive(Diagnostic)]
-#[diag("generic parameters may not be used in const operations")]
+#[diag(
+    "{$is_ogca ->
+    [true] generic parameters in const blocks are only allowed as the direct value of a `type const`
+    *[false] generic parameters may not be used in const operations
+}"
+)]
 pub(crate) struct ParamInNonTrivialAnonConst {
     #[primary_span]
     #[label("cannot perform const operation using `{$name}`")]
@@ -431,6 +420,11 @@ pub(crate) struct ParamInNonTrivialAnonConst {
     pub(crate) param_kind: ParamKindInNonTrivialAnonConst,
     #[help("add `#![feature(generic_const_exprs)]` to allow generic const expressions")]
     pub(crate) help: bool,
+    pub(crate) is_ogca: bool,
+    #[help(
+        "consider factoring the expression into a `type const` item and use it as the const argument instead"
+    )]
+    pub(crate) help_ogca: bool,
 }
 
 #[derive(Debug)]
@@ -636,13 +630,6 @@ pub(crate) struct ProcMacroDeriveResolutionFallback {
 pub(crate) struct MacroExpandedMacroExportsAccessedByAbsolutePaths {
     #[note("the macro is defined here")]
     pub definition: Span,
-}
-
-#[derive(Diagnostic)]
-#[diag("`$crate` may not be imported")]
-pub(crate) struct CrateImported {
-    #[primary_span]
-    pub(crate) span: Span,
 }
 
 #[derive(Diagnostic)]
@@ -973,11 +960,25 @@ pub(crate) struct ArgumentsMacroUseNotAllowed {
     pub(crate) span: Span,
 }
 
+#[derive(Subdiagnostic)]
+#[multipart_suggestion(
+    "try renaming it with a name",
+    applicability = "maybe-incorrect",
+    style = "verbose"
+)]
+pub(crate) struct UnnamedImportSugg {
+    #[suggestion_part(code = "{ident} as name")]
+    pub(crate) span: Span,
+    pub(crate) ident: Ident,
+}
+
 #[derive(Diagnostic)]
-#[diag("crate root imports need to be explicitly named: `use crate as name;`")]
-pub(crate) struct UnnamedCrateRootImport {
+#[diag("imports need to be explicitly named")]
+pub(crate) struct UnnamedImport {
     #[primary_span]
     pub(crate) span: Span,
+    #[subdiagnostic]
+    pub(crate) sugg: Option<UnnamedImportSugg>,
 }
 
 #[derive(Diagnostic)]
@@ -1208,15 +1209,6 @@ pub(crate) struct ToolWasAlreadyRegistered {
     pub(crate) tool: Ident,
     #[label("already registered here")]
     pub(crate) old_ident_span: Span,
-}
-
-#[derive(Diagnostic)]
-#[diag("`{$tool}` only accepts identifiers")]
-pub(crate) struct ToolOnlyAcceptsIdentifiers {
-    #[primary_span]
-    #[label("not an identifier")]
-    pub(crate) span: Span,
-    pub(crate) tool: Symbol,
 }
 
 #[derive(Subdiagnostic)]

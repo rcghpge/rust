@@ -12,13 +12,11 @@ use rustc_data_structures::jobserver::{self, Acquired};
 use rustc_data_structures::memmap::Mmap;
 use rustc_data_structures::profiling::{SelfProfilerRef, VerboseTimingGuard};
 use rustc_errors::emitter::Emitter;
-use rustc_errors::translation::Translator;
 use rustc_errors::{
     Diag, DiagArgMap, DiagCtxt, DiagCtxtHandle, DiagMessage, ErrCode, FatalError, FatalErrorMarker,
     Level, MultiSpan, Style, Suggestions, catch_fatal_errors,
 };
 use rustc_fs_util::link_or_copy;
-use rustc_hir::attrs::AttributeKind;
 use rustc_hir::find_attr;
 use rustc_incremental::{
     copy_cgu_workproduct_to_incr_comp_cache_dir, in_incr_comp_dir, in_incr_comp_dir_sess,
@@ -101,7 +99,6 @@ pub struct ModuleConfig {
     pub emit_ir: bool,
     pub emit_asm: bool,
     pub emit_obj: EmitObj,
-    pub emit_thin_lto: bool,
     pub emit_thin_lto_summary: bool,
 
     // Miscellaneous flags. These are mostly copied from command-line
@@ -212,9 +209,6 @@ impl ModuleConfig {
                 false
             ),
             emit_obj,
-            // thin lto summaries prevent fat lto, so do not emit them if fat
-            // lto is requested. See PR #136840 for background information.
-            emit_thin_lto: sess.opts.unstable_opts.emit_thin_lto && sess.lto() != Lto::Fat,
             emit_thin_lto_summary: if_regular!(
                 sess.opts.output_types.contains_key(&OutputType::ThinLinkBitcode),
                 false
@@ -368,7 +362,7 @@ fn generate_thin_lto_work<B: ExtraBackendMethods>(
     dcx: DiagCtxtHandle<'_>,
     exported_symbols_for_lto: &[String],
     each_linked_rlib_for_lto: &[PathBuf],
-    needs_thin_lto: Vec<(String, B::ThinBuffer)>,
+    needs_thin_lto: Vec<(String, B::ModuleBuffer)>,
     import_only_modules: Vec<(SerializedModule<B::ModuleBuffer>, WorkProduct)>,
 ) -> Vec<(ThinLtoWorkItem<B>, u64)> {
     let _prof_timer = prof.generic_activity("codegen_thin_generate_lto_work");
@@ -422,7 +416,7 @@ enum MaybeLtoModules<B: WriteBackendMethods> {
         cgcx: CodegenContext,
         exported_symbols_for_lto: Arc<Vec<String>>,
         each_linked_rlib_file_for_lto: Vec<PathBuf>,
-        needs_thin_lto: Vec<(String, <B as WriteBackendMethods>::ThinBuffer)>,
+        needs_thin_lto: Vec<(String, <B as WriteBackendMethods>::ModuleBuffer)>,
         lto_import_only_modules:
             Vec<(SerializedModule<<B as WriteBackendMethods>::ModuleBuffer>, WorkProduct)>,
     },
@@ -454,8 +448,7 @@ pub(crate) fn start_async_codegen<B: ExtraBackendMethods>(
 ) -> OngoingCodegen<B> {
     let (coordinator_send, coordinator_receive) = channel();
 
-    let crate_attrs = tcx.hir_attrs(rustc_hir::CRATE_HIR_ID);
-    let no_builtins = find_attr!(crate_attrs, AttributeKind::NoBuiltins);
+    let no_builtins = find_attr!(tcx, crate, NoBuiltins);
 
     let crate_info = CrateInfo::new(tcx, target_cpu);
 
@@ -800,7 +793,7 @@ pub(crate) enum WorkItemResult<B: WriteBackendMethods> {
 
     /// The backend has finished compiling a CGU, which now needs to go through
     /// thin LTO.
-    NeedsThinLto(String, B::ThinBuffer),
+    NeedsThinLto(String, B::ModuleBuffer),
 }
 
 pub enum FatLtoInput<B: WriteBackendMethods> {
@@ -875,22 +868,22 @@ fn execute_optimize_work_item<B: ExtraBackendMethods>(
             WorkItemResult::Finished(module)
         }
         ComputedLtoType::Thin => {
-            let (name, thin_buffer) = B::prepare_thin(module);
+            let thin_buffer = B::serialize_module(module.module_llvm, true);
             if let Some(path) = bitcode {
                 fs::write(&path, thin_buffer.data()).unwrap_or_else(|e| {
                     panic!("Error writing pre-lto-bitcode file `{}`: {}", path.display(), e);
                 });
             }
-            WorkItemResult::NeedsThinLto(name, thin_buffer)
+            WorkItemResult::NeedsThinLto(module.name, thin_buffer)
         }
         ComputedLtoType::Fat => match bitcode {
             Some(path) => {
-                let (name, buffer) = B::serialize_module(module);
+                let buffer = B::serialize_module(module.module_llvm, false);
                 fs::write(&path, buffer.data()).unwrap_or_else(|e| {
                     panic!("Error writing pre-lto-bitcode file `{}`: {}", path.display(), e);
                 });
                 WorkItemResult::NeedsFatLto(FatLtoInput::Serialized {
-                    name,
+                    name: module.name,
                     buffer: SerializedModule::Local(buffer),
                 })
             }
@@ -1027,7 +1020,7 @@ fn do_thin_lto<B: ExtraBackendMethods>(
     tm_factory: TargetMachineFactoryFn<B>,
     exported_symbols_for_lto: Arc<Vec<String>>,
     each_linked_rlib_for_lto: Vec<PathBuf>,
-    needs_thin_lto: Vec<(String, <B as WriteBackendMethods>::ThinBuffer)>,
+    needs_thin_lto: Vec<(String, <B as WriteBackendMethods>::ModuleBuffer)>,
     lto_import_only_modules: Vec<(
         SerializedModule<<B as WriteBackendMethods>::ModuleBuffer>,
         WorkProduct,
@@ -1811,8 +1804,8 @@ fn start_executing_work<B: ExtraBackendMethods>(
                 ));
             } else {
                 if let Some(allocator_module) = allocator_module.take() {
-                    let (name, thin_buffer) = B::prepare_thin(allocator_module);
-                    needs_thin_lto.push((name, thin_buffer));
+                    let thin_buffer = B::serialize_module(allocator_module.module_llvm, true);
+                    needs_thin_lto.push((allocator_module.name, thin_buffer));
                 }
 
                 return Ok(MaybeLtoModules::ThinLto {
@@ -2041,10 +2034,6 @@ impl Emitter for SharedEmitter {
 
     fn source_map(&self) -> Option<&SourceMap> {
         None
-    }
-
-    fn translator(&self) -> &Translator {
-        panic!("shared emitter attempted to translate a diagnostic");
     }
 }
 

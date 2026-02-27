@@ -25,7 +25,7 @@
 
 use std::cell::Ref;
 use std::collections::BTreeSet;
-use std::fmt::{self};
+use std::fmt;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
@@ -53,7 +53,7 @@ use rustc_data_structures::unord::{UnordMap, UnordSet};
 use rustc_errors::{Applicability, Diag, ErrCode, ErrorGuaranteed, LintBuffer};
 use rustc_expand::base::{DeriveResolution, SyntaxExtension, SyntaxExtensionKind};
 use rustc_feature::BUILTIN_ATTRIBUTES;
-use rustc_hir::attrs::{AttributeKind, StrippedCfgItem};
+use rustc_hir::attrs::StrippedCfgItem;
 use rustc_hir::def::Namespace::{self, *};
 use rustc_hir::def::{
     self, CtorOf, DefKind, DocLinkResMap, LifetimeRes, MacroKinds, NonMacroAttrKind, PartialRes,
@@ -274,10 +274,6 @@ enum ResolutionError<'ra> {
     UndeclaredLabel { name: Symbol, suggestion: Option<LabelSuggestion> },
     /// Error E0429: `self` imports are only allowed within a `{ }` list.
     SelfImportsOnlyAllowedWithin { root: bool, span_with_rename: Span },
-    /// Error E0430: `self` import can only appear once in the list.
-    SelfImportCanOnlyAppearOnceInTheList,
-    /// Error E0431: `self` import can only appear in an import list with a non-empty prefix.
-    SelfImportOnlyInImportListWithNonEmptyPrefix,
     /// Error E0433: failed to resolve.
     FailedToResolve {
         segment: Symbol,
@@ -313,7 +309,11 @@ enum ResolutionError<'ra> {
     /// generic parameters must not be used inside const evaluations.
     ///
     /// This error is only emitted when using `min_const_generics`.
-    ParamInNonTrivialAnonConst { name: Symbol, param_kind: ParamKindInNonTrivialAnonConst },
+    ParamInNonTrivialAnonConst {
+        is_ogca: bool,
+        name: Symbol,
+        param_kind: ParamKindInNonTrivialAnonConst,
+    },
     /// generic parameters must not be used inside enum discriminants.
     ///
     /// This error is emitted even with `generic_const_exprs`.
@@ -372,16 +372,6 @@ impl Segment {
         Segment {
             ident,
             id: None,
-            has_generic_args: false,
-            has_lifetime_args: false,
-            args_span: DUMMY_SP,
-        }
-    }
-
-    fn from_ident_and_id(ident: Ident, id: NodeId) -> Segment {
-        Segment {
-            ident,
-            id: Some(id),
             has_generic_args: false,
             has_lifetime_args: false,
             args_span: DUMMY_SP,
@@ -2475,8 +2465,8 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
 
         find_attr!(
             // we can use parsed attrs here since for other crates they're already available
-            self.tcx.get_all_attrs(def_id),
-            AttributeKind::RustcLegacyConstGenerics{fn_indexes,..} => fn_indexes
+            self.tcx, def_id,
+            RustcLegacyConstGenerics{fn_indexes,..} => fn_indexes
         )
         .map(|fn_indexes| fn_indexes.iter().map(|(num, _)| *num).collect())
     }
