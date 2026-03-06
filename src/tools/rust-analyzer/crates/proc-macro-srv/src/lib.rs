@@ -18,7 +18,8 @@
     internal_features,
     clippy::disallowed_types,
     clippy::print_stderr,
-    unused_crate_dependencies
+    unused_crate_dependencies,
+    unused_features
 )]
 #![deny(deprecated_safe, clippy::undocumented_unsafe_blocks)]
 
@@ -121,6 +122,7 @@ pub trait ProcMacroClientInterface {
 
     fn byte_range(&mut self, span: Span) -> Range<usize>;
     fn span_source(&mut self, span: Span) -> Span;
+    fn span_parent(&mut self, span: Span) -> Option<Span>;
 }
 
 const EXPANDER_STACK_SIZE: usize = 8 * 1024 * 1024;

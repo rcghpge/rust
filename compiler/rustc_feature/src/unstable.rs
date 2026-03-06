@@ -3,10 +3,17 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use rustc_data_structures::AtomicRef;
 use rustc_data_structures::fx::FxHashSet;
 use rustc_span::{Span, Symbol, sym};
 
 use super::{Feature, to_nonzero};
+
+fn default_track_feature(_: Symbol) {}
+
+/// Recording used features in the dependency graph so incremental can
+/// replay used features when needed.
+pub static TRACK_FEATURE: AtomicRef<fn(Symbol)> = AtomicRef::new(&(default_track_feature as _));
 
 #[derive(PartialEq)]
 enum FeatureStatus {
@@ -103,7 +110,12 @@ impl Features {
 
     /// Is the given feature enabled (via `#[feature(...)]`)?
     pub fn enabled(&self, feature: Symbol) -> bool {
-        self.enabled_features.contains(&feature)
+        if self.enabled_features.contains(&feature) {
+            TRACK_FEATURE(feature);
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -124,7 +136,7 @@ macro_rules! declare_features {
         impl Features {
             $(
                 pub fn $feature(&self) -> bool {
-                    self.enabled_features.contains(&sym::$feature)
+                    self.enabled(sym::$feature)
                 }
             )*
 
@@ -221,6 +233,8 @@ declare_features! (
     (internal, custom_mir, "1.65.0", None),
     /// Implementation details of externally implementable items
     (internal, eii_internals, "1.94.0", None),
+    /// Implementation details of field representing types.
+    (internal, field_representing_type_raw, "CURRENT_RUSTC_VERSION", None),
     /// Outputs useful `assert!` messages
     (unstable, generic_assert, "1.63.0", None),
     /// Allows using the #[rustc_intrinsic] attribute.
@@ -486,6 +500,8 @@ declare_features! (
     (unstable, ffi_const, "1.45.0", Some(58328)),
     /// Allows the use of `#[ffi_pure]` on foreign functions.
     (unstable, ffi_pure, "1.45.0", Some(58329)),
+    /// Experimental field projections.
+    (incomplete, field_projections, "CURRENT_RUSTC_VERSION", Some(145383)),
     /// Allows marking trait functions as `final` to prevent overriding impls
     (unstable, final_associated_functions, "CURRENT_RUSTC_VERSION", Some(131179)),
     /// Controlling the behavior of fmt::Debug
@@ -516,6 +532,8 @@ declare_features! (
     (unstable, half_open_range_patterns_in_slices, "1.66.0", Some(67264)),
     /// Target features on hexagon.
     (unstable, hexagon_target_feature, "1.27.0", Some(150250)),
+    /// Allows `impl(crate) trait Foo` restrictions.
+    (incomplete, impl_restriction, "CURRENT_RUSTC_VERSION", Some(105077)),
     /// Allows `impl Trait` to be used inside associated types (RFC 2515).
     (unstable, impl_trait_in_assoc_type, "1.70.0", Some(63063)),
     /// Allows `impl Trait` in bindings (`let`).

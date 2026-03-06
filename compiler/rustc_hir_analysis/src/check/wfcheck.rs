@@ -997,7 +997,7 @@ fn check_type_defn<'tcx>(
     item: &hir::Item<'tcx>,
     all_sized: bool,
 ) -> Result<(), ErrorGuaranteed> {
-    let _ = tcx.representability(item.owner_id.def_id);
+    let _ = tcx.check_representability(item.owner_id.def_id);
     let adt_def = tcx.adt_def(item.owner_id);
 
     enter_wf_checking_ctxt(tcx, item.owner_id.def_id, |wfcx| {
@@ -2360,11 +2360,11 @@ fn lint_redundant_lifetimes<'tcx>(
         | DefKind::Trait
         | DefKind::TraitAlias
         | DefKind::Fn
-        | DefKind::Const
+        | DefKind::Const { .. }
         | DefKind::Impl { of_trait: _ } => {
             // Proceed
         }
-        DefKind::AssocFn | DefKind::AssocTy | DefKind::AssocConst => {
+        DefKind::AssocFn | DefKind::AssocTy | DefKind::AssocConst { .. } => {
             if tcx.trait_impl_of_assoc(owner_id.to_def_id()).is_some() {
                 // Don't check for redundant lifetimes for associated items of trait
                 // implementations, since the signature is required to be compatible

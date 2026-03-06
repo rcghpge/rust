@@ -48,9 +48,11 @@ use rustc_macros::{
     TypeVisitable, extension,
 };
 use rustc_serialize::{Decodable, Encodable};
+use rustc_session::config::OptLevel;
 pub use rustc_session::lint::RegisteredTools;
 use rustc_span::hygiene::MacroKind;
 use rustc_span::{DUMMY_SP, ExpnId, ExpnKind, Ident, Span, Symbol};
+use rustc_target::callconv::FnAbi;
 pub use rustc_type_ir::data_structures::{DelayedMap, DelayedSet};
 pub use rustc_type_ir::fast_reject::DeepRejectCtxt;
 #[allow(
@@ -120,7 +122,7 @@ use crate::ty;
 use crate::ty::codec::{TyDecoder, TyEncoder};
 pub use crate::ty::diagnostics::*;
 use crate::ty::fast_reject::SimplifiedType;
-use crate::ty::layout::LayoutError;
+use crate::ty::layout::{FnAbiError, LayoutError};
 use crate::ty::util::Discr;
 use crate::ty::walk::TypeWalker;
 
@@ -1577,7 +1579,9 @@ impl<'tcx> TyCtxt<'tcx> {
     }
 
     pub fn opt_associated_item(self, def_id: DefId) -> Option<AssocItem> {
-        if let DefKind::AssocConst | DefKind::AssocFn | DefKind::AssocTy = self.def_kind(def_id) {
+        if let DefKind::AssocConst { .. } | DefKind::AssocFn | DefKind::AssocTy =
+            self.def_kind(def_id)
+        {
             Some(self.associated_item(def_id))
         } else {
             None
@@ -1679,9 +1683,9 @@ impl<'tcx> TyCtxt<'tcx> {
                 let def_kind = self.def_kind(def);
                 debug!("returned from def_kind: {:?}", def_kind);
                 match def_kind {
-                    DefKind::Const
+                    DefKind::Const { .. }
                     | DefKind::Static { .. }
-                    | DefKind::AssocConst
+                    | DefKind::AssocConst { .. }
                     | DefKind::Ctor(..)
                     | DefKind::AnonConst
                     | DefKind::InlineConst => self.mir_for_ctfe(def),
@@ -2128,10 +2132,10 @@ impl<'tcx> TyCtxt<'tcx> {
             | DefKind::TyAlias
             | DefKind::ForeignTy
             | DefKind::TyParam
-            | DefKind::Const
+            | DefKind::Const { .. }
             | DefKind::ConstParam
             | DefKind::Static { .. }
-            | DefKind::AssocConst
+            | DefKind::AssocConst { .. }
             | DefKind::Macro(_)
             | DefKind::ExternCrate
             | DefKind::Use
@@ -2164,6 +2168,34 @@ impl<'tcx> TyCtxt<'tcx> {
         };
 
         !self.associated_types_for_impl_traits_in_associated_fn(trait_item_def_id).is_empty()
+    }
+
+    /// Compute a `FnAbi` suitable for declaring/defining an `fn` instance, and for direct calls*
+    /// to an `fn`. Indirectly-passed parameters in the returned ABI will include applicable
+    /// codegen optimization attributes, including `ReadOnly` and `CapturesNone` -- deduction of
+    /// which requires inspection of function bodies that can lead to cycles when performed during
+    /// typeck. During typeck, you should therefore use instead the unoptimized ABI returned by
+    /// `fn_abi_of_instance_no_deduced_attrs`.
+    ///
+    /// For performance reasons, you should prefer to call this inherent method rather than invoke
+    /// the `fn_abi_of_instance_raw` query: it delegates to that query if necessary, but where
+    /// possible delegates instead to the `fn_abi_of_instance_no_deduced_attrs` query (thus avoiding
+    /// unnecessary query system overhead).
+    ///
+    /// * that includes virtual calls, which are represented by "direct calls" to an
+    ///   `InstanceKind::Virtual` instance (of `<dyn Trait as Trait>::fn`).
+    #[inline]
+    pub fn fn_abi_of_instance(
+        self,
+        query: ty::PseudoCanonicalInput<'tcx, (ty::Instance<'tcx>, &'tcx ty::List<Ty<'tcx>>)>,
+    ) -> Result<&'tcx FnAbi<'tcx, Ty<'tcx>>, &'tcx FnAbiError<'tcx>> {
+        // Only deduce attrs in full, optimized builds. Otherwise, avoid the query system overhead
+        // of ever invoking the `fn_abi_of_instance_raw` query.
+        if self.sess.opts.optimize != OptLevel::No && self.sess.opts.incremental.is_none() {
+            self.fn_abi_of_instance_raw(query)
+        } else {
+            self.fn_abi_of_instance_no_deduced_attrs(query)
+        }
     }
 }
 

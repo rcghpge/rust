@@ -171,27 +171,13 @@ symbols! {
         AsyncGenFinished,
         AsyncGenPending,
         AsyncGenReady,
-        AtomicBool,
-        AtomicI8,
-        AtomicI16,
-        AtomicI32,
-        AtomicI64,
-        AtomicI128,
-        AtomicIsize,
-        AtomicPtr,
-        AtomicU8,
-        AtomicU16,
-        AtomicU32,
-        AtomicU64,
-        AtomicU128,
-        AtomicUsize,
+        Atomic,
         BTreeMap,
         Bool,
         Borrow,
         BorrowMut,
         Break,
         BuildHasher,
-        C,
         CStr,
         CallOnceFuture,
         CallRefFuture,
@@ -486,7 +472,6 @@ symbols! {
         atomic_load,
         atomic_max,
         atomic_min,
-        atomic_mod,
         atomic_nand,
         atomic_or,
         atomic_singlethreadfence,
@@ -557,7 +542,6 @@ symbols! {
         built,
         builtin_syntax,
         bundle,
-        c,
         c_dash_variadic,
         c_str_literals,
         c_unwind,
@@ -761,7 +745,6 @@ symbols! {
         custom_inner_attributes,
         custom_mir,
         custom_test_frameworks,
-        d,
         d32,
         dead_code,
         dealloc,
@@ -855,7 +838,6 @@ symbols! {
         dyn_star,
         dyn_trait,
         dynamic_no_pic: "dynamic-no-pic",
-        e,
         edition_panic,
         effective_target_features,
         effects,
@@ -923,7 +905,6 @@ symbols! {
         extern_weak,
         external,
         external_doc,
-        f,
         f16,
         f16_nan,
         f16c_target_feature,
@@ -950,7 +931,15 @@ symbols! {
         ffi_const,
         ffi_pure,
         ffi_returns_twice,
+        field,
+        field_base,
         field_init_shorthand,
+        field_of,
+        field_offset,
+        field_projections,
+        field_representing_type,
+        field_representing_type_raw,
+        field_type,
         fields,
         file,
         final_associated_functions,
@@ -1068,6 +1057,7 @@ symbols! {
         immediate_abort: "immediate-abort",
         impl_header_lifetime_elision,
         impl_lint_pass,
+        impl_restriction,
         impl_trait_in_assoc_type,
         impl_trait_in_bindings,
         impl_trait_in_fn_trait_return,
@@ -1227,6 +1217,7 @@ symbols! {
         maxnumf128,
         may_dangle,
         may_unwind,
+        maybe_dangling,
         maybe_uninit,
         maybe_uninit_uninit,
         maybe_uninit_zeroed,
@@ -1718,9 +1709,13 @@ symbols! {
         rustc_driver,
         rustc_dummy,
         rustc_dump_def_parents,
+        rustc_dump_inferred_outlives,
         rustc_dump_item_bounds,
+        rustc_dump_object_lifetime_defaults,
         rustc_dump_predicates,
         rustc_dump_user_args,
+        rustc_dump_variances,
+        rustc_dump_variances_of_opaques,
         rustc_dump_vtable,
         rustc_dyn_incompatible_trait,
         rustc_effective_visibility,
@@ -1757,10 +1752,8 @@ symbols! {
         rustc_nounwind,
         rustc_objc_class,
         rustc_objc_selector,
-        rustc_object_lifetime_default,
         rustc_offload_kernel,
         rustc_on_unimplemented,
-        rustc_outlives,
         rustc_paren_sugar,
         rustc_partition_codegened,
         rustc_partition_reused,
@@ -1790,8 +1783,6 @@ symbols! {
         rustc_then_this_would_need,
         rustc_trivial_field_reads,
         rustc_unsafe_specialization_marker,
-        rustc_variance,
-        rustc_variance_of_opaques,
         rustdoc,
         rustdoc_internals,
         rustdoc_missing_doc_code_examples,
@@ -2782,6 +2773,15 @@ pub mod sym {
     #[doc(inline)]
     pub use super::sym_generated::*;
 
+    // Used quite often in relation to C ABI.
+    pub const C: Symbol = ascii_letter_digit('C').unwrap();
+
+    // RISC-V stuff
+    #[expect(non_upper_case_globals)]
+    pub const f: Symbol = ascii_letter_digit('f').unwrap();
+    #[expect(non_upper_case_globals)]
+    pub const d: Symbol = ascii_letter_digit('d').unwrap();
+
     /// Get the symbol for an integer.
     ///
     /// The first few non-negative integers each have a static symbol and therefore
@@ -2795,6 +2795,23 @@ pub mod sym {
         let mut buffer = itoa::Buffer::new();
         let printed = buffer.format(n);
         Symbol::intern(printed)
+    }
+
+    pub const fn ascii_letter_digit(c: char) -> Option<Symbol> {
+        let i = c as u32;
+        Option::Some(Symbol::new(match c {
+            '0'..='9' => super::SYMBOL_DIGITS_BASE + (i - '0' as u32),
+            'A'..='Z' => super::SYMBOL_UPPERCASE_LETTERS_BASE + (i - 'A' as u32),
+            'a'..='z' => super::SYMBOL_LOWERCASE_LETTERS_BASE + (i - 'a' as u32),
+            _ => return Option::None,
+        }))
+    }
+
+    pub fn character(c: char) -> Symbol {
+        ascii_letter_digit(c).unwrap_or_else(|| {
+            let mut buf: [u8; char::MAX_LEN_UTF8] = Default::default();
+            Symbol::intern(c.encode_utf8(&mut buf))
+        })
     }
 }
 
