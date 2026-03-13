@@ -237,15 +237,6 @@ pub(crate) struct ReprConflicting {
 }
 
 #[derive(Diagnostic)]
-#[diag("alignment must not be greater than `isize::MAX` bytes", code = E0589)]
-#[note("`isize::MAX` is {$size} for the current target")]
-pub(crate) struct InvalidReprAlignForTarget {
-    #[primary_span]
-    pub span: Span,
-    pub size: u64,
-}
-
-#[derive(Diagnostic)]
 #[diag("conflicting representation hints", code = E0566)]
 pub(crate) struct ReprConflictingLint;
 
@@ -310,7 +301,7 @@ pub(crate) enum UnusedNote {
     #[note("`default_method_body_is_const` has been replaced with `const` on traits")]
     DefaultMethodBodyConst,
     #[note(
-        "the `linker_messages` lint can only be controlled at the root of a crate that needs to be linked"
+        "the `linker_messages` and `linker_info` lints can only be controlled at the root of a crate that needs to be linked"
     )]
     LinkerMessagesBinaryCrateOnly,
 }
@@ -997,14 +988,6 @@ pub(crate) struct ImpliedFeatureNotExist {
 }
 
 #[derive(Diagnostic)]
-#[diag("the feature `{$feature}` has already been enabled", code = E0636)]
-pub(crate) struct DuplicateFeatureErr {
-    #[primary_span]
-    pub span: Span,
-    pub feature: Symbol,
-}
-
-#[derive(Diagnostic)]
 #[diag(
     "attributes `#[rustc_const_unstable]`, `#[rustc_const_stable]` and `#[rustc_const_stable_indirect]` require the function or method to be `const`"
 )]
@@ -1151,6 +1134,12 @@ pub(crate) struct ProcMacroBadSig {
     #[primary_span]
     pub span: Span,
     pub kind: ProcMacroKind,
+}
+
+#[derive(Diagnostic)]
+#[diag("the feature `{$feature}` has already been enabled")]
+pub(crate) struct DuplicateFeature {
+    pub feature: Symbol,
 }
 
 #[derive(Diagnostic)]

@@ -7,7 +7,6 @@ use rustc_data_structures::sharded::Sharded;
 use rustc_data_structures::sync::{AtomicU64, WorkerLocal};
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::hir_id::OwnerId;
-use rustc_macros::HashStable;
 use rustc_span::{ErrorGuaranteed, Span};
 pub use sealed::IntoQueryParam;
 
@@ -58,7 +57,6 @@ pub enum ActiveKeyStatus<'tcx> {
 pub enum CycleErrorHandling {
     Error,
     DelayBug,
-    Stash,
 }
 
 #[derive(Clone, Debug)]
@@ -114,13 +112,6 @@ pub struct QueryVTable<'tcx, C: QueryCache> {
     pub state: QueryState<'tcx, C::Key>,
     pub cache: C,
 
-    /// Function pointer that calls `tcx.$query(key)` for this query and
-    /// discards the returned value.
-    ///
-    /// This is a weird thing to be doing, and probably not what you want.
-    /// It is used for loading query results from disk-cache in some cases.
-    pub call_query_method_fn: fn(tcx: TyCtxt<'tcx>, key: C::Key),
-
     /// Function pointer that actually calls this query's provider.
     /// Also performs some associated secondary tasks; see the macro-defined
     /// implementation in `mod invoke_provider_fn` for more details.
@@ -128,25 +119,29 @@ pub struct QueryVTable<'tcx, C: QueryCache> {
     /// This should be the only code that calls the provider function.
     pub invoke_provider_fn: fn(tcx: TyCtxt<'tcx>, key: C::Key) -> C::Value,
 
-    pub will_cache_on_disk_for_key_fn: fn(tcx: TyCtxt<'tcx>, key: &C::Key) -> bool,
+    pub will_cache_on_disk_for_key_fn: fn(tcx: TyCtxt<'tcx>, key: C::Key) -> bool,
 
     pub try_load_from_disk_fn: fn(
         tcx: TyCtxt<'tcx>,
-        key: &C::Key,
+        key: C::Key,
         prev_index: SerializedDepNodeIndex,
         index: DepNodeIndex,
     ) -> Option<C::Value>,
 
     pub is_loadable_from_disk_fn:
-        fn(tcx: TyCtxt<'tcx>, key: &C::Key, index: SerializedDepNodeIndex) -> bool,
+        fn(tcx: TyCtxt<'tcx>, key: C::Key, index: SerializedDepNodeIndex) -> bool,
 
     /// Function pointer that hashes this query's result values.
     ///
     /// For `no_hash` queries, this function pointer is None.
     pub hash_value_fn: Option<fn(&mut StableHashingContext<'_>, &C::Value) -> Fingerprint>,
 
-    pub value_from_cycle_error:
-        fn(tcx: TyCtxt<'tcx>, cycle_error: CycleError, guar: ErrorGuaranteed) -> C::Value,
+    pub value_from_cycle_error: fn(
+        tcx: TyCtxt<'tcx>,
+        key: C::Key,
+        cycle_error: CycleError,
+        guar: ErrorGuaranteed,
+    ) -> C::Value,
     pub format_value: fn(&C::Value) -> String,
 
     /// Formats a human-readable description of this query and its key, as
@@ -217,11 +212,19 @@ pub struct TyCtxtEnsureOk<'tcx> {
 
 #[derive(Copy, Clone)]
 #[must_use]
+pub struct TyCtxtEnsureResult<'tcx> {
+    pub tcx: TyCtxt<'tcx>,
+}
+
+#[derive(Copy, Clone)]
+#[must_use]
 pub struct TyCtxtEnsureDone<'tcx> {
     pub tcx: TyCtxt<'tcx>,
 }
 
 impl<'tcx> TyCtxt<'tcx> {
+    /// FIXME: `ensure_ok`'s effects are subtle. Is this comment fully accurate?
+    ///
     /// Wrapper that calls queries in a special "ensure OK" mode, for callers
     /// that don't need the return value and just want to invoke a query for
     /// its potential side-effect of emitting fatal errors.
@@ -242,15 +245,19 @@ impl<'tcx> TyCtxt<'tcx> {
     ///
     /// Therefore, this call mode is not appropriate for callers that want to
     /// ensure that the query is _never_ executed in the future.
-    ///
-    /// ## `return_result_from_ensure_ok`
-    /// If a query has the `return_result_from_ensure_ok` modifier, calls via
-    /// `ensure_ok` will instead return `Result<(), ErrorGuaranteed>`. If the
-    /// query needs to be executed, and execution returns an error, that error
-    /// is returned to the caller.
     #[inline(always)]
     pub fn ensure_ok(self) -> TyCtxtEnsureOk<'tcx> {
         TyCtxtEnsureOk { tcx: self }
+    }
+
+    /// This is a variant of `ensure_ok` only usable with queries that return
+    /// `Result<_, ErrorGuaranteed>`. Queries calls through this function will
+    /// return `Result<(), ErrorGuaranteed>`. I.e. the error status is returned
+    /// but nothing else. As with `ensure_ok`, this can be more efficient than
+    /// a normal query call.
+    #[inline(always)]
+    pub fn ensure_result(self) -> TyCtxtEnsureResult<'tcx> {
+        TyCtxtEnsureResult { tcx: self }
     }
 
     /// Wrapper that calls queries in a special "ensure done" mode, for callers
@@ -306,7 +313,7 @@ macro_rules! define_callbacks {
                     eval_always: $eval_always:literal,
                     feedable: $feedable:literal,
                     no_hash: $no_hash:literal,
-                    return_result_from_ensure_ok: $return_result_from_ensure_ok:literal,
+                    returns_error_guaranteed: $returns_error_guaranteed:literal,
                     separate_provide_extern: $separate_provide_extern:literal,
                 }
             )*
@@ -331,15 +338,6 @@ macro_rules! define_callbacks {
                 /// Key type used by provider functions in `local_providers`.
                 #[cfg(not($separate_provide_extern))]
                 pub type LocalKey<'tcx> = Key<'tcx>;
-
-                /// Return type of the `.ensure_ok()` method for this query,
-                /// which has the `return_result_from_ensure_ok` modifier.
-                #[cfg($return_result_from_ensure_ok)]
-                pub type EnsureOkReturnType = Result<(), rustc_errors::ErrorGuaranteed>;
-                /// Return type of the `.ensure_ok()` method for this query,
-                /// which does _not_ have the `return_result_from_ensure_ok` modifier.
-                #[cfg(not($return_result_from_ensure_ok))]
-                pub type EnsureOkReturnType = ();
 
                 /// Type returned from query providers and loaded from disk-cache.
                 #[cfg($arena_cache)]
@@ -432,21 +430,31 @@ macro_rules! define_callbacks {
             $(
                 $(#[$attr])*
                 #[inline(always)]
-                pub fn $name(
-                    self,
-                    key: query_helper_param_ty!($($K)*),
-                ) -> $crate::queries::$name::EnsureOkReturnType {
-
-                    #[cfg($return_result_from_ensure_ok)]
-                    let ensure_fn = crate::query::inner::query_ensure_error_guaranteed;
-                    #[cfg(not($return_result_from_ensure_ok))]
-                    let ensure_fn = crate::query::inner::query_ensure;
-
-                    ensure_fn(
+                pub fn $name(self, key: query_helper_param_ty!($($K)*)) {
+                    crate::query::inner::query_ensure_ok_or_done(
                         self.tcx,
                         &self.tcx.query_system.query_vtables.$name,
                         $crate::query::IntoQueryParam::into_query_param(key),
                         $crate::query::EnsureMode::Ok,
+                    )
+                }
+            )*
+        }
+
+        // Only defined when the `ensure_result` modifier is present.
+        impl<'tcx> $crate::query::TyCtxtEnsureResult<'tcx> {
+            $(
+                #[cfg($returns_error_guaranteed)]
+                $(#[$attr])*
+                #[inline(always)]
+                pub fn $name(
+                    self,
+                    key: query_helper_param_ty!($($K)*),
+                ) -> Result<(), rustc_errors::ErrorGuaranteed> {
+                    crate::query::inner::query_ensure_result(
+                        self.tcx,
+                        &self.tcx.query_system.query_vtables.$name,
+                        $crate::query::IntoQueryParam::into_query_param(key),
                     )
                 }
             )*
@@ -457,7 +465,7 @@ macro_rules! define_callbacks {
                 $(#[$attr])*
                 #[inline(always)]
                 pub fn $name(self, key: query_helper_param_ty!($($K)*)) {
-                    crate::query::inner::query_ensure(
+                    crate::query::inner::query_ensure_ok_or_done(
                         self.tcx,
                         &self.tcx.query_system.query_vtables.$name,
                         $crate::query::IntoQueryParam::into_query_param(key),
@@ -644,9 +652,6 @@ mod sealed {
         }
     }
 }
-
-#[derive(Copy, Clone, Debug, HashStable)]
-pub struct CyclePlaceholder(pub ErrorGuaranteed);
 
 #[cold]
 pub(crate) fn default_query(name: &str, key: &dyn std::fmt::Debug) -> ! {

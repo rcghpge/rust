@@ -48,7 +48,7 @@
     html_playground_url = "https://play.rust-lang.org/",
     issue_tracker_base_url = "https://github.com/rust-lang/rust/issues/",
     test(no_crate_inject, attr(deny(warnings))),
-    test(attr(allow(dead_code, deprecated, unused_variables, unused_mut)))
+    test(attr(allow(dead_code, deprecated, unused_variables, unused_mut, duplicate_features)))
 )]
 #![doc(rust_logo)]
 #![doc(auto_cfg(hide(
@@ -206,7 +206,7 @@ use prelude::rust_2024::*;
 #[macro_use]
 mod macros;
 
-#[stable(feature = "assert_matches", since = "CURRENT_RUSTC_VERSION")]
+#[stable(feature = "assert_matches", since = "1.95.0")]
 pub use crate::macros::{assert_matches, debug_assert_matches};
 
 #[unstable(feature = "derive_from", issue = "144889")]
@@ -227,7 +227,7 @@ pub mod autodiff {
 #[unstable(feature = "contracts", issue = "128044")]
 pub mod contracts;
 
-#[stable(feature = "cfg_select", since = "CURRENT_RUSTC_VERSION")]
+#[stable(feature = "cfg_select", since = "1.95.0")]
 pub use crate::macros::cfg_select;
 
 #[macro_use]
@@ -307,7 +307,7 @@ pub mod pat;
 pub mod pin;
 #[unstable(feature = "random", issue = "130703")]
 pub mod random;
-#[stable(feature = "new_range_inclusive_api", since = "CURRENT_RUSTC_VERSION")]
+#[stable(feature = "new_range_inclusive_api", since = "1.95.0")]
 pub mod range;
 pub mod result;
 pub mod sync;
