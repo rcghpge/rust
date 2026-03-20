@@ -344,10 +344,6 @@ Tests for `#![feature(coverage_attribute)]`. See [Tracking issue for function at
 
 Tests for crate resolution and loading behavior, including `extern crate` declarations, `--extern` flags, or the `use` keyword.
 
-## `tests/ui/cross/`: Various tests related to the concept of "cross"
-
-**FIXME**: The unifying topic of these tests appears to be that their filenames begin with the word "cross". The similarities end there - one test is about "cross-borrowing" a `Box<T>` into `&T`, while another is about a global trait used "across" files. Some of this terminology is really outdated and does not match the current terminology. Additionally, "cross" is also way too generic, it's easy to confuse with cross-compile.
-
 ## `tests/ui/cross-crate/`: Cross-Crate Interaction
 
 Tests for behavior spanning multiple crates, including visibility rules, trait implementations, and type resolution across crate boundaries.
@@ -760,12 +756,6 @@ Tests for rustc-internal lints.
 
 Tests for the `{std,core}::intrinsics`, internal implementation detail.
 
-## `tests/ui/invalid/`
-
-Various tests related to rejecting invalid inputs.
-
-**FIXME**: This is rather uninformative, possibly rehome into more meaningful directories.
-
 ## `tests/ui/io-checks/`: Input Output
 
 Tests for I/O related behaviour, covering stdout/stderr handling and error propagation.
@@ -787,10 +777,6 @@ These tests revolve around the `--json` compiler flag. See [JSON Output](https:/
 ## `tests/ui/keyword/`
 
 Tests exercising keywords, such as attempting to use them as identifiers when not contextual keywords.
-
-## `tests/ui/kindck/`
-
-**FIXME**: `kindck` is no longer a thing, these tests probably need to be audited and rehomed.
 
 ## `tests/ui/label/`
 
@@ -1000,12 +986,6 @@ Tests on lifetimes on objects, such as a lifetime bound not being able to be ded
 
 **FIXME**: Just a more specific subset of `ui/lifetimes`.
 
-## `tests/ui/obsolete-in-place/`
-
-Contains a single test. Check that we reject the ancient Rust syntax `x <- y` and `in(BINDING) {}` construct.
-
-**FIXME**: Definitely should be rehomed, maybe to `tests/ui/deprecation/`.
-
 ## `tests/ui/offload`
 
 Exercises the offload feature.
@@ -1022,10 +1002,6 @@ Exercises the [`std::mem::offset_of` macro](https://doc.rust-lang.org/beta/std/m
 ## `tests/ui/on-unimplemented/`
 
 Exercises the `#[rustc_on_unimplemented]`.
-
-## `tests/ui/operator-recovery/`
-
-**FIXME**: Probably move under `tests/ui/binop/` or `tests/ui/parser/`.
 
 ## `tests/ui/or-patterns/`
 

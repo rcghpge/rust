@@ -1,3 +1,5 @@
+use std::mem;
+
 use rustc_abi::ExternAbi;
 use rustc_ast::visit::AssocCtxt;
 use rustc_ast::*;
@@ -10,7 +12,7 @@ use rustc_hir::{
 };
 use rustc_index::{IndexSlice, IndexVec};
 use rustc_middle::span_bug;
-use rustc_middle::ty::{ResolverAstLowering, TyCtxt};
+use rustc_middle::ty::TyCtxt;
 use rustc_span::def_id::DefId;
 use rustc_span::edit_distance::find_best_match_for_name;
 use rustc_span::{DUMMY_SP, DesugaringKind, Ident, Span, Symbol, kw, sym};
@@ -25,9 +27,9 @@ use super::{
     RelaxedBoundForbiddenReason, RelaxedBoundPolicy, ResolverAstLoweringExt,
 };
 
-pub(super) struct ItemLowerer<'a, 'hir> {
+pub(super) struct ItemLowerer<'a, 'hir, R> {
     pub(super) tcx: TyCtxt<'hir>,
-    pub(super) resolver: &'a mut ResolverAstLowering<'hir>,
+    pub(super) resolver: &'a mut R,
     pub(super) ast_index: &'a IndexSlice<LocalDefId, AstOwner<'a>>,
     pub(super) owners: &'a mut IndexVec<LocalDefId, hir::MaybeOwner<'hir>>,
 }
@@ -51,11 +53,11 @@ fn add_ty_alias_where_clause(
         if before.0 || !after.0 { before } else { after };
 }
 
-impl<'a, 'hir> ItemLowerer<'a, 'hir> {
+impl<'hir, R: ResolverAstLoweringExt<'hir>> ItemLowerer<'_, 'hir, R> {
     fn with_lctx(
         &mut self,
         owner: NodeId,
-        f: impl FnOnce(&mut LoweringContext<'_, 'hir>) -> hir::OwnerNode<'hir>,
+        f: impl FnOnce(&mut LoweringContext<'_, 'hir, R>) -> hir::OwnerNode<'hir>,
     ) {
         let mut lctx = LoweringContext::new(self.tcx, self.ast_index, self.resolver);
         lctx.with_hir_id_owner(owner, |lctx| f(lctx));
@@ -77,7 +79,7 @@ impl<'a, 'hir> ItemLowerer<'a, 'hir> {
             match node {
                 AstOwner::NonOwner => {}
                 AstOwner::Crate(c) => {
-                    assert_eq!(self.resolver.node_id_to_def_id[&CRATE_NODE_ID], CRATE_DEF_ID);
+                    assert_eq!(self.resolver.local_def_id(CRATE_NODE_ID), CRATE_DEF_ID);
                     self.with_lctx(CRATE_NODE_ID, |lctx| {
                         let module = lctx.lower_mod(&c.items, &c.spans);
                         // FIXME(jdonszelman): is dummy span ever a problem here?
@@ -99,7 +101,7 @@ impl<'a, 'hir> ItemLowerer<'a, 'hir> {
     }
 }
 
-impl<'hir> LoweringContext<'_, 'hir> {
+impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
     pub(super) fn lower_mod(
         &mut self,
         items: &[Box<Item>],
@@ -345,6 +347,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
                         body.as_deref(),
                         attrs,
                         contract.as_deref(),
+                        header.constness,
                     );
 
                     let itctx = ImplTraitContext::Universal;
@@ -1024,6 +1027,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
                     Some(body),
                     attrs,
                     contract.as_deref(),
+                    sig.header.constness,
                 );
                 let (generics, sig) = self.lower_method_sig(
                     generics,
@@ -1217,6 +1221,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
                     body.as_deref(),
                     attrs,
                     contract.as_deref(),
+                    sig.header.constness,
                 );
                 let (generics, sig) = self.lower_method_sig(
                     generics,
@@ -1346,11 +1351,13 @@ impl<'hir> LoweringContext<'_, 'hir> {
         f: impl FnOnce(&mut Self) -> (&'hir [hir::Param<'hir>], hir::Expr<'hir>),
     ) -> hir::BodyId {
         let prev_coroutine_kind = self.coroutine_kind.take();
+        let prev_is_in_const_context = mem::take(&mut self.is_in_const_context);
         let task_context = self.task_context.take();
         let (parameters, result) = f(self);
         let body_id = self.record_body(parameters, result);
         self.task_context = task_context;
         self.coroutine_kind = prev_coroutine_kind;
+        self.is_in_const_context = prev_is_in_const_context;
         body_id
     }
 
@@ -1369,9 +1376,13 @@ impl<'hir> LoweringContext<'_, 'hir> {
         &mut self,
         decl: &FnDecl,
         contract: Option<&FnContract>,
+        constness: Const,
         body: impl FnOnce(&mut Self) -> hir::Expr<'hir>,
     ) -> hir::BodyId {
         self.lower_body(|this| {
+            if let Const::Yes(_) = constness {
+                this.is_in_const_context = true;
+            }
             let params =
                 this.arena.alloc_from_iter(decl.inputs.iter().map(|x| this.lower_param(x)));
 
@@ -1389,8 +1400,9 @@ impl<'hir> LoweringContext<'_, 'hir> {
         decl: &FnDecl,
         body: &Block,
         contract: Option<&FnContract>,
+        constness: Const,
     ) -> hir::BodyId {
-        self.lower_fn_body(decl, contract, |this| this.lower_block_expr(body))
+        self.lower_fn_body(decl, contract, constness, |this| this.lower_block_expr(body))
     }
 
     pub(super) fn lower_const_body(&mut self, span: Span, expr: Option<&Expr>) -> hir::BodyId {
@@ -1398,7 +1410,10 @@ impl<'hir> LoweringContext<'_, 'hir> {
             (
                 &[],
                 match expr {
-                    Some(expr) => this.lower_expr_mut(expr),
+                    Some(expr) => {
+                        this.is_in_const_context = true;
+                        this.lower_expr_mut(expr)
+                    }
                     None => this.expr_err(span, this.dcx().span_delayed_bug(span, "no block")),
                 },
             )
@@ -1417,12 +1432,13 @@ impl<'hir> LoweringContext<'_, 'hir> {
         body: Option<&Block>,
         attrs: &'hir [hir::Attribute],
         contract: Option<&FnContract>,
+        constness: Const,
     ) -> hir::BodyId {
         let Some(body) = body else {
             // Functions without a body are an error, except if this is an intrinsic. For those we
             // create a fake body so that the entire rest of the compiler doesn't have to deal with
             // this as a special case.
-            return self.lower_fn_body(decl, contract, |this| {
+            return self.lower_fn_body(decl, contract, constness, |this| {
                 if find_attr!(attrs, RustcIntrinsic) || this.tcx.is_sdylib_interface_build() {
                     let span = this.lower_span(span);
                     let empty_block = hir::Block {
@@ -1447,7 +1463,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
         };
         let Some(coroutine_kind) = coroutine_kind else {
             // Typical case: not a coroutine.
-            return self.lower_fn_body_block(decl, body, contract);
+            return self.lower_fn_body_block(decl, body, contract, constness);
         };
         // FIXME(contracts): Support contracts on async fn.
         self.lower_body(|this| {
@@ -1475,7 +1491,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
     pub(crate) fn lower_coroutine_body_with_moved_arguments(
         &mut self,
         decl: &FnDecl,
-        lower_body: impl FnOnce(&mut LoweringContext<'_, 'hir>) -> hir::Expr<'hir>,
+        lower_body: impl FnOnce(&mut LoweringContext<'_, 'hir, R>) -> hir::Expr<'hir>,
         fn_decl_span: Span,
         body_span: Span,
         coroutine_kind: CoroutineKind,
@@ -1612,7 +1628,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
             parameters.push(new_parameter);
         }
 
-        let mkbody = |this: &mut LoweringContext<'_, 'hir>| {
+        let mkbody = |this: &mut LoweringContext<'_, 'hir, R>| {
             // Create a block from the user's function body:
             let user_body = lower_body(this);
 
