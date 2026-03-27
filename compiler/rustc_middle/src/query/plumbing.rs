@@ -2,13 +2,14 @@ use std::fmt;
 use std::ops::Deref;
 
 use rustc_data_structures::fingerprint::Fingerprint;
+use rustc_data_structures::fx::FxIndexMap;
 use rustc_data_structures::hash_table::HashTable;
 use rustc_data_structures::sharded::Sharded;
-use rustc_data_structures::sync::{AtomicU64, WorkerLocal};
+use rustc_data_structures::sync::{AtomicU64, Lock, WorkerLocal};
 use rustc_errors::Diag;
 use rustc_span::Span;
 
-use crate::dep_graph::{DepKind, DepNodeIndex, SerializedDepNodeIndex};
+use crate::dep_graph::{DepKind, DepNodeIndex, QuerySideEffect, SerializedDepNodeIndex};
 use crate::ich::StableHashingContext;
 use crate::queries::{ExternProviders, Providers, QueryArenas, QueryVTables, TaggedQueryKey};
 use crate::query::on_disk_cache::OnDiskCache;
@@ -47,12 +48,12 @@ pub enum ActiveKeyStatus<'tcx> {
 }
 
 #[derive(Debug)]
-pub struct CycleError<'tcx> {
+pub struct Cycle<'tcx> {
     /// The query and related span that uses the cycle.
     pub usage: Option<QueryStackFrame<'tcx>>,
 
     /// The span here corresponds to the reason for which this query was required.
-    pub cycle: Vec<QueryStackFrame<'tcx>>,
+    pub frames: Vec<QueryStackFrame<'tcx>>,
 }
 
 #[derive(Debug)]
@@ -77,8 +78,6 @@ pub enum EnsureMode {
 pub struct QueryVTable<'tcx, C: QueryCache> {
     pub name: &'static str,
 
-    /// True if this query has the `anon` modifier.
-    pub anon: bool,
     /// True if this query has the `eval_always` modifier.
     pub eval_always: bool,
     /// True if this query has the `depth_limit` modifier.
@@ -106,9 +105,6 @@ pub struct QueryVTable<'tcx, C: QueryCache> {
         index: DepNodeIndex,
     ) -> Option<C::Value>,
 
-    pub is_loadable_from_disk_fn:
-        fn(tcx: TyCtxt<'tcx>, key: C::Key, index: SerializedDepNodeIndex) -> bool,
-
     /// Function pointer that hashes this query's result values.
     ///
     /// For `no_hash` queries, this function pointer is None.
@@ -116,13 +112,10 @@ pub struct QueryVTable<'tcx, C: QueryCache> {
 
     /// Function pointer that handles a cycle error. `error` must be consumed, e.g. with `emit` (if
     /// it should be emitted) or `delay_as_bug` (if it need not be emitted because an alternative
-    /// error is created and emitted).
-    pub value_from_cycle_error: fn(
-        tcx: TyCtxt<'tcx>,
-        key: C::Key,
-        cycle_error: CycleError<'tcx>,
-        error: Diag<'_>,
-    ) -> C::Value,
+    /// error is created and emitted). A value may be returned, or (more commonly) the function may
+    /// just abort after emitting the error.
+    pub handle_cycle_error_fn:
+        fn(tcx: TyCtxt<'tcx>, key: C::Key, cycle: Cycle<'tcx>, error: Diag<'_>) -> C::Value,
 
     pub format_value: fn(&C::Value) -> String,
 
@@ -155,6 +148,13 @@ impl<'tcx, C: QueryCache> fmt::Debug for QueryVTable<'tcx, C> {
 pub struct QuerySystem<'tcx> {
     pub arenas: WorkerLocal<QueryArenas<'tcx>>,
     pub query_vtables: QueryVTables<'tcx>,
+
+    /// Side-effect associated with each [`DepKind::SideEffect`] node in the
+    /// current incremental-compilation session. Side effects will be written
+    /// to disk, and loaded by [`OnDiskCache`] in the next session.
+    ///
+    /// Always empty if incremental compilation is off.
+    pub side_effects: Lock<FxIndexMap<DepNodeIndex, QuerySideEffect>>,
 
     /// This provides access to the incremental compilation on-disk cache for query results.
     /// Do not access this directly. It is only meant to be used by
@@ -283,12 +283,12 @@ macro_rules! define_callbacks {
                 fn $name:ident($($K:tt)*) -> $V:ty
                 {
                     // Search for (QMODLIST) to find all occurrences of this query modifier list.
-                    anon: $anon:literal,
                     arena_cache: $arena_cache:literal,
                     cache_on_disk: $cache_on_disk:literal,
                     depth_limit: $depth_limit:literal,
                     eval_always: $eval_always:literal,
                     feedable: $feedable:literal,
+                    no_force: $no_force:literal,
                     no_hash: $no_hash:literal,
                     returns_error_guaranteed: $returns_error_guaranteed:literal,
                     separate_provide_extern: $separate_provide_extern:literal,
