@@ -505,6 +505,7 @@ symbols! {
         avx512bw,
         avx512f,
         await_macro,
+        backchain,
         bang,
         begin_panic,
         bench,
@@ -746,6 +747,7 @@ symbols! {
         custom_mir,
         custom_test_frameworks,
         d32,
+        dbg_macro,
         dead_code,
         dealloc,
         debug,
@@ -915,10 +917,7 @@ symbols! {
         f64_nan,
         f128,
         f128_nan,
-        fabsf16,
-        fabsf32,
-        fabsf64,
-        fabsf128,
+        fabs,
         fadd_algebraic,
         fadd_fast,
         fake_variadic,
@@ -1015,6 +1014,7 @@ symbols! {
         generic_assert,
         generic_associated_types,
         generic_associated_types_extended,
+        generic_const_args,
         generic_const_exprs,
         generic_const_items,
         generic_const_parameter_types,
@@ -1227,6 +1227,7 @@ symbols! {
         maybe_uninit,
         maybe_uninit_uninit,
         maybe_uninit_zeroed,
+        mem,
         mem_align_const,
         mem_discriminant,
         mem_drop,
@@ -1414,7 +1415,6 @@ symbols! {
         on_move,
         on_unimplemented,
         opaque,
-        opaque_generic_const_args,
         opaque_module_name_placeholder: "<opaque>",
         ops,
         opt_out_copy,
@@ -1855,8 +1855,6 @@ symbols! {
         simd_flog10,
         simd_floor,
         simd_fma,
-        simd_fmax,
-        simd_fmin,
         simd_fsin,
         simd_fsqrt,
         simd_funnel_shl,
@@ -1870,6 +1868,8 @@ symbols! {
         simd_lt,
         simd_masked_load,
         simd_masked_store,
+        simd_maximum_number_nsz,
+        simd_minimum_number_nsz,
         simd_mul,
         simd_ne,
         simd_neg,
@@ -1920,6 +1920,7 @@ symbols! {
         slice_len_fn,
         slice_patterns,
         slicing_syntax,
+        soft_float: "soft-float",
         sparc,
         sparc64,
         sparc_target_feature,
@@ -2600,17 +2601,17 @@ impl fmt::Display for Symbol {
     }
 }
 
-impl<CTX> HashStable<CTX> for Symbol {
+impl<Hcx> HashStable<Hcx> for Symbol {
     #[inline]
-    fn hash_stable(&self, hcx: &mut CTX, hasher: &mut StableHasher) {
+    fn hash_stable(&self, hcx: &mut Hcx, hasher: &mut StableHasher) {
         self.as_str().hash_stable(hcx, hasher);
     }
 }
 
-impl<CTX> ToStableHashKey<CTX> for Symbol {
+impl<Hcx> ToStableHashKey<Hcx> for Symbol {
     type KeyType = String;
     #[inline]
-    fn to_stable_hash_key(&self, _: &CTX) -> String {
+    fn to_stable_hash_key(&self, _: &Hcx) -> String {
         self.as_str().to_string()
     }
 }
@@ -2660,9 +2661,9 @@ impl fmt::Debug for ByteSymbol {
     }
 }
 
-impl<CTX> HashStable<CTX> for ByteSymbol {
+impl<Hcx> HashStable<Hcx> for ByteSymbol {
     #[inline]
-    fn hash_stable(&self, hcx: &mut CTX, hasher: &mut StableHasher) {
+    fn hash_stable(&self, hcx: &mut Hcx, hasher: &mut StableHasher) {
         self.as_byte_str().hash_stable(hcx, hasher);
     }
 }

@@ -285,14 +285,16 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                         let mut err = struct_span_code_err!(self.dcx(), span, E0277, "{}", err_msg);
 
                         let trait_def_id = main_trait_predicate.def_id();
-                        if self.tcx.is_diagnostic_item(sym::From, trait_def_id)
-                            || self.tcx.is_diagnostic_item(sym::TryFrom, trait_def_id)
+                        let leaf_trait_def_id = leaf_trait_predicate.def_id();
+                        if (self.tcx.is_diagnostic_item(sym::From, trait_def_id)
+                            || self.tcx.is_diagnostic_item(sym::TryFrom, trait_def_id))
+                            && (self.tcx.is_diagnostic_item(sym::From, leaf_trait_def_id)
+                                || self.tcx.is_diagnostic_item(sym::TryFrom, leaf_trait_def_id))
                         {
                             let trait_ref = leaf_trait_predicate.skip_binder().trait_ref;
 
-                            // Defensive: next-solver may produce fewer args than expected.
-                            if trait_ref.args.len() > 1 {
-                                let found_ty = trait_ref.args.type_at(1);
+                            if let Some(found_ty) = trait_ref.args.get(1).and_then(|arg| arg.as_type())
+                            {
                                 let ty = main_trait_predicate.skip_binder().self_ty();
 
                                 if let Some(cast_ty) = self.find_explicit_cast_type(
@@ -2876,6 +2878,10 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
         trait_predicate: ty::PolyTraitPredicate<'tcx>,
         root_obligation: &PredicateObligation<'tcx>,
     ) -> (PredicateObligation<'tcx>, ty::PolyTraitPredicate<'tcx>) {
+        if obligation.predicate.has_non_region_param() || obligation.has_non_region_infer() {
+            return (obligation.clone(), trait_predicate);
+        }
+
         let ocx = ObligationCtxt::new(self);
         let normalized_predicate = self.tcx.erase_and_anonymize_regions(
             self.tcx.instantiate_bound_regions_with_erased(trait_predicate),
