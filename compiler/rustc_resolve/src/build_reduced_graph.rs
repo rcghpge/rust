@@ -32,16 +32,15 @@ use tracing::debug;
 
 use crate::Namespace::{MacroNS, TypeNS, ValueNS};
 use crate::def_collector::collect_definitions;
-use crate::imports::{ImportData, ImportKind};
+use crate::diagnostics::StructCtor;
+use crate::imports::{ImportData, ImportKind, OnUnknownData};
 use crate::macros::{MacroRulesDecl, MacroRulesScope, MacroRulesScopeRef};
 use crate::ref_mut::CmCell;
 use crate::{
     BindingKey, Decl, DeclData, DeclKind, ExternPreludeEntry, Finalize, IdentKey, MacroData,
-    Module, ModuleKind, ModuleOrUniformRoot, ParentScope, PathResult, ResolutionError, Resolver,
-    Segment, Used, VisResolutionError, errors,
+    Module, ModuleKind, ModuleOrUniformRoot, ParentScope, PathResult, Res, ResolutionError,
+    Resolver, Segment, Used, VisResolutionError, errors,
 };
-
-type Res = def::Res<NodeId>;
 
 impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
     /// Attempt to put the declaration with the given name and namespace into the module,
@@ -545,6 +544,7 @@ impl<'a, 'ra, 'tcx> BuildReducedGraphVisitor<'a, 'ra, 'tcx> {
             root_id,
             vis,
             vis_span: item.vis.span,
+            on_unknown_attr: OnUnknownData::from_attrs(self.r.tcx, item),
         });
 
         self.r.indeterminate_imports.push(import);
@@ -626,41 +626,41 @@ impl<'a, 'ra, 'tcx> BuildReducedGraphVisitor<'a, 'ra, 'tcx> {
 
         match use_tree.kind {
             ast::UseTreeKind::Simple(rename) => {
-                let mut ident = use_tree.ident();
                 let mut module_path = prefix;
-                let mut source = module_path.pop().unwrap();
+                let source = module_path.pop().unwrap();
 
                 // `true` for `...::{self [as target]}` imports, `false` otherwise.
                 let type_ns_only = nested && source.ident.name == kw::SelfLower;
 
+                // Suggest `use prefix::{self};` for `use prefix::self;`
                 if source.ident.name == kw::SelfLower
-                    && let Some(parent) = module_path.pop()
+                    && let Some(parent) = module_path.last()
+                    && !type_ns_only
+                    && (parent.ident.name != kw::PathRoot
+                        || self.r.path_root_is_crate_root(parent.ident))
                 {
-                    // Suggest `use prefix::{self};` for `use prefix::self;`
-                    if !type_ns_only
-                        && (parent.ident.name != kw::PathRoot
-                            || self.r.path_root_is_crate_root(parent.ident))
-                    {
-                        let span_with_rename = match rename {
-                            Some(rename) => source.ident.span.to(rename.span),
-                            None => source.ident.span,
-                        };
+                    let span_with_rename = match rename {
+                        Some(rename) => source.ident.span.to(rename.span),
+                        None => source.ident.span,
+                    };
 
-                        self.r.report_error(
-                            parent.ident.span.shrink_to_hi().to(source.ident.span),
-                            ResolutionError::SelfImportsOnlyAllowedWithin {
-                                root: parent.ident.name == kw::PathRoot,
-                                span_with_rename,
-                            },
-                        );
-                    }
-
-                    let self_span = source.ident.span;
-                    source = parent;
-                    if rename.is_none() {
-                        ident = Ident::new(source.ident.name, self_span);
-                    }
+                    self.r.report_error(
+                        parent.ident.span.shrink_to_hi().to(source.ident.span),
+                        ResolutionError::SelfImportsOnlyAllowedWithin {
+                            root: parent.ident.name == kw::PathRoot,
+                            span_with_rename,
+                        },
+                    );
                 }
+
+                let ident = if source.ident.name == kw::SelfLower
+                    && rename.is_none()
+                    && let Some(parent) = module_path.last()
+                {
+                    Ident::new(parent.ident.name, source.ident.span)
+                } else {
+                    use_tree.ident()
+                };
 
                 match source.ident.name {
                     kw::DollarCrate => {
@@ -698,7 +698,11 @@ impl<'a, 'ra, 'tcx> BuildReducedGraphVisitor<'a, 'ra, 'tcx> {
                         }
                     }
                     // Deny `use ::{self};` after edition 2015
-                    kw::PathRoot if !self.r.path_root_is_crate_root(source.ident) => {
+                    kw::SelfLower
+                        if let Some(parent) = module_path.last()
+                            && parent.ident.name == kw::PathRoot
+                            && !self.r.path_root_is_crate_root(parent.ident) =>
+                    {
                         self.r.dcx().span_err(use_tree.span(), "extern prelude cannot be imported");
                         return;
                     }
@@ -924,7 +928,7 @@ impl<'a, 'ra, 'tcx> BuildReducedGraphVisitor<'a, 'ra, 'tcx> {
                         vis
                     };
 
-                    let mut ret_fields = Vec::with_capacity(vdata.fields().len());
+                    let mut field_visibilities = Vec::with_capacity(vdata.fields().len());
 
                     for field in vdata.fields() {
                         // NOTE: The field may be an expansion placeholder, but expansion sets
@@ -936,7 +940,7 @@ impl<'a, 'ra, 'tcx> BuildReducedGraphVisitor<'a, 'ra, 'tcx> {
                         if ctor_vis.is_at_least(field_vis, self.r.tcx) {
                             ctor_vis = field_vis;
                         }
-                        ret_fields.push(field_vis.to_def_id());
+                        field_visibilities.push(field_vis.to_def_id());
                     }
                     let feed = self.r.feed(ctor_node_id);
                     let ctor_def_id = feed.key();
@@ -946,9 +950,9 @@ impl<'a, 'ra, 'tcx> BuildReducedGraphVisitor<'a, 'ra, 'tcx> {
                     // We need the field visibility spans also for the constructor for E0603.
                     self.insert_field_visibilities_local(ctor_def_id.to_def_id(), vdata.fields());
 
-                    self.r
-                        .struct_constructors
-                        .insert(local_def_id, (ctor_res, ctor_vis.to_def_id(), ret_fields));
+                    let ctor =
+                        StructCtor { res: ctor_res, vis: ctor_vis.to_def_id(), field_visibilities };
+                    self.r.struct_ctors.insert(local_def_id, ctor);
                 }
                 self.r.struct_generics.insert(local_def_id, generics.clone());
             }
@@ -1026,6 +1030,7 @@ impl<'a, 'ra, 'tcx> BuildReducedGraphVisitor<'a, 'ra, 'tcx> {
             module_path: Vec::new(),
             vis,
             vis_span: item.vis.span,
+            on_unknown_attr: OnUnknownData::from_attrs(self.r.tcx, item),
         });
         if used {
             self.r.import_use_map.insert(import, Used::Other);
@@ -1121,7 +1126,7 @@ impl<'a, 'ra, 'tcx> BuildReducedGraphVisitor<'a, 'ra, 'tcx> {
             AttributeParser::parse_limited(
                 self.r.tcx.sess,
                 &item.attrs,
-                sym::macro_use,
+                &[sym::macro_use],
                 item.span,
                 item.id,
                 None,
@@ -1158,6 +1163,7 @@ impl<'a, 'ra, 'tcx> BuildReducedGraphVisitor<'a, 'ra, 'tcx> {
                 module_path: Vec::new(),
                 vis: Visibility::Restricted(CRATE_DEF_ID),
                 vis_span: item.vis.span,
+                on_unknown_attr: OnUnknownData::from_attrs(this.r.tcx, item),
             })
         };
 
@@ -1329,6 +1335,7 @@ impl<'a, 'ra, 'tcx> BuildReducedGraphVisitor<'a, 'ra, 'tcx> {
                     module_path: Vec::new(),
                     vis,
                     vis_span: item.vis.span,
+                    on_unknown_attr: OnUnknownData::from_attrs(self.r.tcx, item),
                 });
                 self.r.import_use_map.insert(import, Used::Other);
                 let import_decl = self.r.new_import_decl(decl, import);
