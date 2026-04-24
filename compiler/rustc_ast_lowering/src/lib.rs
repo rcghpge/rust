@@ -41,7 +41,7 @@ use std::sync::Arc;
 use rustc_ast::node_id::NodeMap;
 use rustc_ast::visit::Visitor;
 use rustc_ast::{self as ast, *};
-use rustc_attr_parsing::{AttributeParser, Late, OmitDoc};
+use rustc_attr_parsing::{AttributeParser, EmitAttribute, Late, OmitDoc};
 use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::fx::FxIndexSet;
 use rustc_data_structures::sorted_map::SortedMap;
@@ -51,8 +51,8 @@ use rustc_data_structures::tagged_ptr::TaggedRef;
 use rustc_errors::{DiagArgFromDisplay, DiagCtxtHandle};
 use rustc_hir::def::{DefKind, LifetimeRes, Namespace, PartialRes, PerNS, Res};
 use rustc_hir::def_id::{CRATE_DEF_ID, LOCAL_CRATE, LocalDefId};
-use rustc_hir::definitions::{DefPathData, DisambiguatorState};
-use rustc_hir::lints::{AttributeLint, DelayedLint};
+use rustc_hir::definitions::PerParentDisambiguatorState;
+use rustc_hir::lints::{AttributeLint, DelayedLint, DynAttribute};
 use rustc_hir::{
     self as hir, AngleBrackets, ConstArg, GenericArg, HirId, ItemLocalMap, LifetimeSource,
     LifetimeSyntax, ParamName, Target, TraitCandidate, find_attr,
@@ -70,7 +70,7 @@ use thin_vec::ThinVec;
 use tracing::{debug, instrument, trace};
 
 use crate::errors::{AssocTyParentheses, AssocTyParenthesesSub, MisplacedImplTrait};
-use crate::item::Owners;
+use crate::item::{Disambiguators, Owners};
 
 macro_rules! arena_vec {
     ($this:expr; $($x:expr),*) => (
@@ -94,7 +94,8 @@ pub mod stability;
 struct LoweringContext<'a, 'hir, R> {
     tcx: TyCtxt<'hir>,
     resolver: &'a mut R,
-    disambiguator: DisambiguatorState,
+    disambiguators: &'a mut Disambiguators,
+    current_disambiguator: PerParentDisambiguatorState,
 
     /// Used to allocate HIR nodes.
     arena: &'hir hir::Arena<'hir>,
@@ -154,12 +155,13 @@ struct LoweringContext<'a, 'hir, R> {
 }
 
 impl<'a, 'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'a, 'hir, R> {
-    fn new(tcx: TyCtxt<'hir>, resolver: &'a mut R) -> Self {
+    fn new(tcx: TyCtxt<'hir>, resolver: &'a mut R, disambiguators: &'a mut Disambiguators) -> Self {
         let registered_tools = tcx.registered_tools(()).iter().map(|x| x.name).collect();
         Self {
             tcx,
             resolver,
-            disambiguator: DisambiguatorState::new(),
+            disambiguators,
+            current_disambiguator: Default::default(),
             arena: tcx.hir_arena,
 
             // HirId handling.
@@ -624,11 +626,13 @@ pub fn lower_to_hir(tcx: TyCtxt<'_>, (): ()) -> mid_hir::Crate<'_> {
         tcx.definitions_untracked().def_index_count(),
     );
 
+    let mut disambiguators = Disambiguators::Default(resolver.disambiguators.steal());
     let mut lowerer = item::ItemLowerer {
         tcx,
         resolver: &mut resolver,
         ast_index: &ast_index,
         owners: Owners::IndexVec(&mut owners),
+        disambiguators: &mut disambiguators,
     };
 
     let mut delayed_ids: FxIndexSet<LocalDefId> = Default::default();
@@ -647,7 +651,11 @@ pub fn lower_to_hir(tcx: TyCtxt<'_>, (): ()) -> mid_hir::Crate<'_> {
     let opt_hir_hash =
         if tcx.needs_crate_hash() { Some(compute_hir_hash(tcx, &owners)) } else { None };
 
-    let delayed_resolver = Steal::new((resolver, krate));
+    let Disambiguators::Default(disambiguators) = disambiguators else { unreachable!() };
+    let delayed_disambigs =
+        Arc::new(disambiguators.into_items().map(|(id, d)| (id, Steal::new(d))).collect());
+
+    let delayed_resolver = Steal::new((resolver, krate, delayed_disambigs));
     mid_hir::Crate::new(owners, delayed_ids, delayed_resolver, opt_hir_hash)
 }
 
@@ -655,7 +663,7 @@ pub fn lower_to_hir(tcx: TyCtxt<'_>, (): ()) -> mid_hir::Crate<'_> {
 pub fn lower_delayed_owner(tcx: TyCtxt<'_>, def_id: LocalDefId) {
     let krate = tcx.hir_crate(());
 
-    let (resolver, krate) = &*krate.delayed_resolver.borrow();
+    let (resolver, krate, delayed_disambigs) = &*krate.delayed_resolver.borrow();
 
     // FIXME!!!(fn_delegation): make ast index lifetime same as resolver,
     // as it is too bad to reindex whole crate on each delegation lowering.
@@ -669,12 +677,12 @@ pub fn lower_delayed_owner(tcx: TyCtxt<'_>, def_id: LocalDefId) {
     };
 
     let mut map = Default::default();
-
     let mut lowerer = item::ItemLowerer {
         tcx,
         resolver: &mut resolver,
         ast_index: &ast_index,
         owners: Owners::Map(&mut map),
+        disambiguators: &mut Disambiguators::Delayed(Arc::clone(delayed_disambigs)),
     };
 
     lowerer.lower_node(def_id);
@@ -717,7 +725,6 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
         node_id: ast::NodeId,
         name: Option<Symbol>,
         def_kind: DefKind,
-        def_path_data: DefPathData,
         span: Span,
     ) -> LocalDefId {
         let parent = self.current_hir_id_owner.def_id;
@@ -733,7 +740,7 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
         let def_id = self
             .tcx
             .at(span)
-            .create_def(parent, name, def_kind, Some(def_path_data), &mut self.disambiguator)
+            .create_def(parent, name, def_kind, None, &mut self.current_disambiguator)
             .def_id();
 
         debug!("create_def: def_id_to_node_id[{:?}] <-> {:?}", def_id, node_id);
@@ -773,7 +780,16 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
         f: impl FnOnce(&mut Self) -> hir::OwnerNode<'hir>,
     ) {
         let owner_id = self.owner_id(owner);
+        let def_id = owner_id.def_id;
 
+        let new_disambig = match &mut self.disambiguators {
+            Disambiguators::Default(map) => map.remove(&def_id),
+            Disambiguators::Delayed(map) => map.get(&def_id).map(Steal::steal),
+        };
+
+        let new_disambig = new_disambig.unwrap_or_else(|| PerParentDisambiguatorState::new(def_id));
+
+        let disambiguator = std::mem::replace(&mut self.current_disambiguator, new_disambig);
         let current_attrs = std::mem::take(&mut self.attrs);
         let current_bodies = std::mem::take(&mut self.bodies);
         let current_define_opaque = std::mem::take(&mut self.define_opaque);
@@ -808,6 +824,7 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
         assert!(self.impl_trait_bounds.is_empty());
         let info = self.make_owner_info(item);
 
+        self.current_disambiguator = disambiguator;
         self.attrs = current_attrs;
         self.bodies = current_bodies;
         self.define_opaque = current_define_opaque;
@@ -847,14 +864,12 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
         let bodies = SortedMap::from_presorted_elements(bodies);
 
         // Don't hash unless necessary, because it's expensive.
-        let rustc_middle::hir::Hashes { opt_hash_including_bodies, attrs_hash, delayed_lints_hash } =
-            self.tcx.hash_owner_nodes(node, &bodies, &attrs, &delayed_lints, define_opaque);
+        let rustc_middle::hir::Hashes { opt_hash_including_bodies, attrs_hash } =
+            self.tcx.hash_owner_nodes(node, &bodies, &attrs, define_opaque);
         let num_nodes = self.item_local_id_counter.as_usize();
         let (nodes, parenting) = index::index_hir(self.tcx, node, &bodies, num_nodes);
         let nodes = hir::OwnerNodes { opt_hash_including_bodies, nodes, bodies };
         let attrs = hir::AttributeMap { map: attrs, opt_hash: attrs_hash, define_opaque };
-        let delayed_lints =
-            hir::lints::DelayedLints { lints: delayed_lints, opt_hash: delayed_lints_hash };
 
         self.arena.alloc(hir::OwnerInfo { nodes, parenting, attrs, trait_map, delayed_lints })
     }
@@ -1015,7 +1030,6 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
                     param,
                     Some(kw::UnderscoreLifetime),
                     DefKind::LifetimeParam,
-                    DefPathData::DesugaredAnonymousLifetime,
                     ident.span,
                 );
                 debug!(?_def_id);
@@ -1167,13 +1181,23 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
             target,
             OmitDoc::Lower,
             |s| l.lower(s),
-            |lint_id, span, kind| {
-                self.delayed_lints.push(DelayedLint::AttributeParsing(AttributeLint {
-                    lint_id,
-                    id: target_hir_id,
-                    span,
-                    kind,
-                }));
+            |lint_id, span, kind| match kind {
+                EmitAttribute::Static(attr_kind) => {
+                    self.delayed_lints.push(DelayedLint::AttributeParsing(AttributeLint {
+                        lint_id,
+                        id: target_hir_id,
+                        span,
+                        kind: attr_kind,
+                    }));
+                }
+                EmitAttribute::Dynamic(callback) => {
+                    self.delayed_lints.push(DelayedLint::Dynamic(DynAttribute {
+                        lint_id,
+                        id: target_hir_id,
+                        span,
+                        callback,
+                    }));
+                }
             },
         )
     }
@@ -1832,7 +1856,7 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
         // as they are not explicit in HIR/Ty function signatures.
         // (instead, the `c_variadic` flag is set to `true`)
         let mut inputs = &decl.inputs[..];
-        if c_variadic {
+        if decl.c_variadic() {
             inputs = &inputs[..inputs.len() - 1];
         }
         let inputs = self.arena.alloc_from_iter(inputs.iter().map(|param| {
@@ -1895,12 +1919,8 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
             },
         };
 
-        self.arena.alloc(hir::FnDecl {
-            inputs,
-            output,
-            c_variadic,
-            lifetime_elision_allowed: self.resolver.lifetime_elision_allowed(fn_node_id),
-            implicit_self: decl.inputs.get(0).map_or(hir::ImplicitSelfKind::None, |arg| {
+        let fn_decl_kind = hir::FnDeclFlags::default()
+            .set_implicit_self(decl.inputs.get(0).map_or(hir::ImplicitSelfKind::None, |arg| {
                 let is_mutable_pat = matches!(
                     arg.pat.kind,
                     PatKind::Ident(hir::BindingMode(_, Mutability::Mut), ..)
@@ -1922,8 +1942,11 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
                     }
                     _ => hir::ImplicitSelfKind::None,
                 }
-            }),
-        })
+            }))
+            .set_lifetime_elision_allowed(self.resolver.lifetime_elision_allowed(fn_node_id))
+            .set_c_variadic(c_variadic);
+
+        self.arena.alloc(hir::FnDecl { inputs, output, fn_decl_kind })
     }
 
     // Transforms `-> T` for `async fn` into `-> OpaqueTy { .. }`
@@ -2504,13 +2527,7 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
             // We're lowering a const argument that was originally thought to be a type argument,
             // so the def collector didn't create the def ahead of time. That's why we have to do
             // it here.
-            let def_id = self.create_def(
-                node_id,
-                None,
-                DefKind::AnonConst,
-                DefPathData::LateAnonConst,
-                span,
-            );
+            let def_id = self.create_def(node_id, None, DefKind::AnonConst, span);
             let hir_id = self.lower_node_id(node_id);
 
             let path_expr = Expr {

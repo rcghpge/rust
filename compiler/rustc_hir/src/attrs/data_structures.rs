@@ -1208,6 +1208,13 @@ pub enum AttributeKind {
         directive: Option<Box<Directive>>,
     },
 
+    /// Represents `#[diagnostic::on_unmatch_args]`.
+    OnUnmatchArgs {
+        span: Span,
+        /// None if the directive was malformed in some way.
+        directive: Option<Box<Directive>>,
+    },
+
     /// Represents `#[optimize(size|speed)]`
     Optimize(OptimizeAttr, Span),
 
@@ -1505,6 +1512,9 @@ pub enum AttributeKind {
 
     /// Represents `#[rustc_no_mir_inline]`
     RustcNoMirInline,
+
+    /// Represents `#[rustc_no_writable]`
+    RustcNoWritable,
 
     /// Represents `#[rustc_non_const_trait_method]`.
     RustcNonConstTraitMethod,

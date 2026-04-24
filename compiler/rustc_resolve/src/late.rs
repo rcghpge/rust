@@ -40,9 +40,9 @@ use thin_vec::ThinVec;
 use tracing::{debug, instrument, trace};
 
 use crate::{
-    BindingError, BindingKey, Decl, DelegationFnSig, Finalize, IdentKey, LateDecl, Module,
-    ModuleOrUniformRoot, ParentScope, PathResult, Res, ResolutionError, Resolver, Segment, Stage,
-    TyCtxt, UseError, Used, errors, path_names_to_string, rustdoc,
+    BindingError, BindingKey, Decl, DelegationFnSig, Finalize, IdentKey, LateDecl, LocalModule,
+    Module, ModuleOrUniformRoot, ParentScope, PathResult, Res, ResolutionError, Resolver, Segment,
+    Stage, TyCtxt, UseError, Used, errors, path_names_to_string, rustdoc,
 };
 
 mod diagnostics;
@@ -196,7 +196,7 @@ pub(crate) enum RibKind<'ra> {
     /// `Block(None)` must be always processed in the same way as `Block(Some(module))`
     /// with empty `module`. The module can be `None` only because creation of some definitely
     /// empty modules is skipped as an optimization.
-    Block(Option<Module<'ra>>),
+    Block(Option<LocalModule<'ra>>),
 
     /// We passed through an impl or trait and are now in one of its
     /// methods or associated types. Allow references to ty params that impl or trait
@@ -217,7 +217,7 @@ pub(crate) enum RibKind<'ra> {
     ConstantItem(ConstantHasGenerics, Option<(Ident, ConstantItemKind)>),
 
     /// We passed through a module item.
-    Module(Module<'ra>),
+    Module(LocalModule<'ra>),
 
     /// We passed through a `macro_rules!` statement
     MacroDefinition(DefId),
@@ -365,6 +365,9 @@ enum LifetimeRibKind {
 
     /// This rib acts as a barrier to forbid reference to lifetimes of a parent item.
     Item,
+
+    /// Lifetimes cannot be elided in `impl Trait` types without `#![feature(anonymous_lifetime_in_impl_trait)]`.
+    ImplTrait,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -941,7 +944,7 @@ impl<'ast, 'ra, 'tcx> Visitor<'ast> for LateResolutionVisitor<'_, 'ast, 'ra, 'tc
             }
             TyKind::ImplTrait(..) => {
                 let candidates = self.lifetime_elision_candidates.take();
-                visit::walk_ty(self, ty);
+                self.with_lifetime_rib(LifetimeRibKind::ImplTrait, |this| visit::walk_ty(this, ty));
                 self.lifetime_elision_candidates = candidates;
             }
             TyKind::TraitObject(bounds, ..) => {
@@ -1353,6 +1356,7 @@ impl<'ast, 'ra, 'tcx> Visitor<'ast> for LateResolutionVisitor<'_, 'ast, 'ra, 'tc
                         LifetimeRibKind::AnonymousCreateParameter { .. }
                         | LifetimeRibKind::AnonymousReportError
                         | LifetimeRibKind::StaticIfNoLifetimeInScope { .. }
+                        | LifetimeRibKind::ImplTrait
                         | LifetimeRibKind::Elided(_)
                         | LifetimeRibKind::ElisionFailure
                         | LifetimeRibKind::ConcreteAnonConst(_)
@@ -1473,7 +1477,7 @@ impl<'a, 'ast, 'ra, 'tcx> LateResolutionVisitor<'a, 'ast, 'ra, 'tcx> {
         // During late resolution we only track the module component of the parent scope,
         // although it may be useful to track other components as well for diagnostics.
         let graph_root = resolver.graph_root;
-        let parent_scope = ParentScope::module(graph_root, resolver.arenas);
+        let parent_scope = ParentScope::module(graph_root.to_module(), resolver.arenas);
         let start_rib_kind = RibKind::Module(graph_root);
         LateResolutionVisitor {
             r: resolver,
@@ -1780,6 +1784,15 @@ impl<'a, 'ast, 'ra, 'tcx> LateResolutionVisitor<'a, 'ast, 'ra, 'tcx> {
                                     LifetimeRibKind::ConcreteAnonConst(_) => {
                                         span_bug!(ident.span, "unexpected rib kind: {:?}", rib.kind)
                                     }
+
+                                    LifetimeRibKind::ImplTrait => {
+                                        if self.r.tcx.features().anonymous_lifetime_in_impl_trait()
+                                        {
+                                            None
+                                        } else {
+                                            Some(LifetimeUseSet::Many)
+                                        }
+                                    }
                                 })
                                 .unwrap_or(LifetimeUseSet::Many);
                             debug!(?use_ctxt, ?use_set);
@@ -1819,6 +1832,7 @@ impl<'a, 'ast, 'ra, 'tcx> LateResolutionVisitor<'a, 'ast, 'ra, 'tcx> {
                 | LifetimeRibKind::Generics { .. }
                 | LifetimeRibKind::ElisionFailure
                 | LifetimeRibKind::AnonymousReportError
+                | LifetimeRibKind::ImplTrait
                 | LifetimeRibKind::StaticIfNoLifetimeInScope { .. } => {}
             }
         }
@@ -2000,7 +2014,9 @@ impl<'a, 'ast, 'ra, 'tcx> LateResolutionVisitor<'a, 'ast, 'ra, 'tcx> {
                     return;
                 }
                 LifetimeRibKind::Item => break,
-                LifetimeRibKind::Generics { .. } | LifetimeRibKind::ConstParamTy => {}
+                LifetimeRibKind::Generics { .. }
+                | LifetimeRibKind::ConstParamTy
+                | LifetimeRibKind::ImplTrait => {}
                 LifetimeRibKind::ConcreteAnonConst(_) => {
                     // There is always an `Elided(LifetimeRes::Infer)` inside an `AnonConst`.
                     span_bug!(lifetime.ident.span, "unexpected rib kind: {:?}", rib.kind)
@@ -2323,7 +2339,9 @@ impl<'a, 'ast, 'ra, 'tcx> LateResolutionVisitor<'a, 'ast, 'ra, 'tcx> {
                         }
                         break;
                     }
-                    LifetimeRibKind::Generics { .. } | LifetimeRibKind::ConstParamTy => {}
+                    LifetimeRibKind::Generics { .. }
+                    | LifetimeRibKind::ConstParamTy
+                    | LifetimeRibKind::ImplTrait => {}
                     LifetimeRibKind::ConcreteAnonConst(_) => {
                         // There is always an `Elided(LifetimeRes::Infer)` inside an `AnonConst`.
                         span_bug!(elided_lifetime_span, "unexpected rib kind: {:?}", rib.kind)
@@ -2875,8 +2893,8 @@ impl<'a, 'ast, 'ra, 'tcx> LateResolutionVisitor<'a, 'ast, 'ra, 'tcx> {
             ItemKind::Mod(..) => {
                 let module = self.r.expect_module(self.r.local_def_id(item.id).to_def_id());
                 let orig_module = replace(&mut self.parent_scope.module, module);
-                self.with_rib(ValueNS, RibKind::Module(module), |this| {
-                    this.with_rib(TypeNS, RibKind::Module(module), |this| {
+                self.with_rib(ValueNS, RibKind::Module(module.expect_local()), |this| {
+                    this.with_rib(TypeNS, RibKind::Module(module.expect_local()), |this| {
                         if mod_inner_docs {
                             this.resolve_doc_links(&item.attrs, MaybeExported::Ok(item.id));
                         }
@@ -3747,7 +3765,10 @@ impl<'a, 'ast, 'ra, 'tcx> LateResolutionVisitor<'a, 'ast, 'ra, 'tcx> {
                 );
                 Visibility::Public
             };
-            this.r.feed_visibility(this.r.feed(id), vis);
+            // HACK: because we don't want to track the `TyCtxtFeed` through the resolver to here
+            // in a hash-map, we instead conjure a `TyCtxtFeed` for any `DefId` here, but prevent
+            // it from being used generally.
+            this.r.tcx.feed_visibility_for_trait_impl_item(this.r.local_def_id(id), vis);
         };
 
         let Some(decl) = decl else {
@@ -4961,6 +4982,7 @@ impl<'a, 'ast, 'ra, 'tcx> LateResolutionVisitor<'a, 'ast, 'ra, 'tcx> {
                 segment_name,
                 error_implied_by_parse_error: _,
                 message,
+                note: _,
             } => {
                 return Err(respan(
                     span,
@@ -5015,7 +5037,7 @@ impl<'a, 'ast, 'ra, 'tcx> LateResolutionVisitor<'a, 'ast, 'ra, 'tcx> {
             debug!("(resolving block) found anonymous module, moving down");
             self.ribs[ValueNS].push(Rib::new(RibKind::Block(Some(anonymous_module))));
             self.ribs[TypeNS].push(Rib::new(RibKind::Block(Some(anonymous_module))));
-            self.parent_scope.module = anonymous_module;
+            self.parent_scope.module = anonymous_module.to_module();
         } else {
             self.ribs[ValueNS].push(Rib::new(RibKind::Block(None)));
         }

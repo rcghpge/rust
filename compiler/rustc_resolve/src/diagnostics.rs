@@ -979,23 +979,47 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                     .source_map()
                     .span_extend_to_prev_str(ident.span, current, true, false);
 
-                let ((with, with_label), without) = match sp {
+                let (with, with_label, without) = match sp {
                     Some(sp) if !self.tcx.sess.source_map().is_multiline(sp) => {
                         let sp = sp
                             .with_lo(BytePos(sp.lo().0 - (current.len() as u32)))
                             .until(ident.span);
-                        (
-                        (Some(errs::AttemptToUseNonConstantValueInConstantWithSuggestion {
-                                span: sp,
-                                suggestion,
-                                current,
-                                type_span,
-                            }), Some(errs::AttemptToUseNonConstantValueInConstantLabelWithSuggestion {span})),
-                            None,
-                        )
+
+                        // Only suggest replacing the binding keyword if this is a simple
+                        // binding.
+                        //
+                        // Note: this approach still incorrectly suggests for irrefutable
+                        // patterns like `if let x = 1 { const { x } }`, since the text
+                        // between `let` and the identifier is just whitespace.
+                        // See tests/ui/consts/non-const-value-in-const-irrefutable-pat-binding.rs
+                        let is_simple_binding =
+                            self.tcx.sess.source_map().span_to_snippet(sp).is_ok_and(|snippet| {
+                                let after_keyword = snippet[current.len()..].trim();
+                                after_keyword.is_empty() || after_keyword == "mut"
+                            });
+
+                        if is_simple_binding {
+                            (
+                                Some(errs::AttemptToUseNonConstantValueInConstantWithSuggestion {
+                                    span: sp,
+                                    suggestion,
+                                    current,
+                                    type_span,
+                                }),
+                                Some(errs::AttemptToUseNonConstantValueInConstantLabelWithSuggestion { span }),
+                                None,
+                            )
+                        } else {
+                            (
+                                None,
+                                Some(errs::AttemptToUseNonConstantValueInConstantLabelWithSuggestion { span }),
+                                None,
+                            )
+                        }
                     }
                     _ => (
-                        (None, None),
+                        None,
+                        None,
                         Some(errs::AttemptToUseNonConstantValueInConstantWithoutSuggestion {
                             ident_span: ident.span,
                             suggestion,
@@ -1585,7 +1609,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
             lookup_ident,
             namespace,
             parent_scope,
-            self.graph_root,
+            self.graph_root.to_module(),
             crate_path,
             &filter_fn,
         );
@@ -2074,7 +2098,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
 
             if kind != AmbiguityKind::GlobVsGlob {
                 if let Scope::ModuleNonGlobs(module, _) | Scope::ModuleGlobs(module, _) = scope {
-                    if module == self.graph_root {
+                    if module == self.graph_root.to_module() {
                         help_msgs.push(format!(
                             "use `crate::{ident}` to refer to this {thing} unambiguously"
                         ));
@@ -2452,7 +2476,8 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                 self.local_module_map
                     .iter()
                     .filter(|(_, module)| {
-                        current_module.is_ancestor_of(**module) && current_module != **module
+                        let module = module.to_module();
+                        current_module.is_ancestor_of(module) && current_module != module
                     })
                     .flat_map(|(_, module)| module.kind.name()),
             )
@@ -2461,7 +2486,8 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                     .borrow()
                     .iter()
                     .filter(|(_, module)| {
-                        current_module.is_ancestor_of(**module) && current_module != **module
+                        let module = module.to_module();
+                        current_module.is_ancestor_of(module) && current_module != module
                     })
                     .flat_map(|(_, module)| module.kind.name()),
             )

@@ -46,9 +46,9 @@ use rustc_ast as ast;
 use rustc_ast::*;
 use rustc_data_structures::fx::FxHashSet;
 use rustc_errors::ErrorGuaranteed;
-use rustc_hir as hir;
 use rustc_hir::attrs::{AttributeKind, InlineAttr};
 use rustc_hir::def_id::DefId;
+use rustc_hir::{self as hir, FnDeclFlags};
 use rustc_middle::span_bug;
 use rustc_middle::ty::Asyncness;
 use rustc_span::symbol::kw;
@@ -143,7 +143,8 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
 
                 let (param_count, c_variadic) = self.param_count(sig_id);
 
-                let mut generics = self.uplift_delegation_generics(delegation, sig_id, item_id);
+                let mut generics =
+                    self.uplift_delegation_generics(delegation, sig_id, item_id, is_method);
 
                 let body_id = self.lower_delegation_body(
                     delegation,
@@ -271,7 +272,7 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
     // Function parameter count, including C variadic `...` if present.
     fn param_count(&self, def_id: DefId) -> (usize, bool /*c_variadic*/) {
         let sig = self.tcx.fn_sig(def_id).skip_binder().skip_binder();
-        (sig.inputs().len() + usize::from(sig.c_variadic), sig.c_variadic)
+        (sig.inputs().len() + usize::from(sig.c_variadic()), sig.c_variadic())
     }
 
     fn lower_delegation_decl(
@@ -301,6 +302,8 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
                 hir::InferDelegationSig::Output(self.arena.alloc(hir::DelegationGenerics {
                     child_args_segment_id: generics.child.args_segment_id,
                     parent_args_segment_id: generics.parent.args_segment_id,
+                    self_ty_id: generics.self_ty_id,
+                    propagate_self_ty: generics.propagate_self_ty,
                 })),
             )),
             span,
@@ -309,9 +312,9 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
         self.arena.alloc(hir::FnDecl {
             inputs,
             output: hir::FnRetTy::Return(output),
-            c_variadic,
-            lifetime_elision_allowed: true,
-            implicit_self: hir::ImplicitSelfKind::None,
+            fn_decl_kind: FnDeclFlags::default()
+                .set_lifetime_elision_allowed(true)
+                .set_c_variadic(c_variadic),
         })
     }
 
@@ -331,11 +334,11 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
             safety: if self.tcx.codegen_fn_attrs(sig_id).safe_target_features {
                 hir::HeaderSafety::SafeTargetFeatures
             } else {
-                hir::HeaderSafety::Normal(sig.safety)
+                hir::HeaderSafety::Normal(sig.safety())
             },
             constness: self.tcx.constness(sig_id),
             asyncness,
-            abi: sig.abi,
+            abi: sig.abi(),
         };
 
         hir::FnSig { decl, header, span }
@@ -554,6 +557,12 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
                 }
             };
 
+            generics.self_ty_id = match new_path {
+                hir::QPath::Resolved(ty, _) => ty,
+                hir::QPath::TypeRelative(ty, _) => Some(ty),
+            }
+            .map(|ty| ty.hir_id);
+
             let callee_path = self.arena.alloc(self.mk_expr(hir::ExprKind::Path(new_path), span));
             self.arena.alloc(self.mk_expr(hir::ExprKind::Call(callee_path, args), span))
         };
@@ -603,13 +612,7 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
         span: Span,
         delegation: &Delegation,
     ) -> DelegationResults<'hir> {
-        let decl = self.arena.alloc(hir::FnDecl {
-            inputs: &[],
-            output: hir::FnRetTy::DefaultReturn(span),
-            c_variadic: false,
-            lifetime_elision_allowed: true,
-            implicit_self: hir::ImplicitSelfKind::None,
-        });
+        let decl = self.arena.alloc(hir::FnDecl::dummy(span));
 
         let header = self.generate_header_error();
         let sig = hir::FnSig { decl, header, span };

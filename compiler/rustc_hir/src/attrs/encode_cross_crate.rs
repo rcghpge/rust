@@ -80,6 +80,7 @@ impl AttributeKind {
             OnMove { .. } => Yes,
             OnUnimplemented { .. } => Yes,
             OnUnknown { .. } => Yes,
+            OnUnmatchArgs { .. } => Yes,
             Optimize(..) => No,
             PanicRuntime => No,
             PatchableFunctionEntry { .. } => Yes,
@@ -163,6 +164,7 @@ impl AttributeKind {
             RustcNoImplicitAutorefs => Yes,
             RustcNoImplicitBounds => No,
             RustcNoMirInline => Yes,
+            RustcNoWritable => Yes,
             RustcNonConstTraitMethod => No, // should be reported via other queries like `constness`
             RustcNonnullOptimizationGuaranteed => Yes,
             RustcNounwind => No,
