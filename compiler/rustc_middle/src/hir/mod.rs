@@ -12,16 +12,15 @@ use rustc_ast::{self as ast};
 use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::fx::FxIndexSet;
 use rustc_data_structures::sorted_map::SortedMap;
-use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
+use rustc_data_structures::stable_hasher::{HashStable, HashStableContext, StableHasher};
 use rustc_data_structures::steal::Steal;
 use rustc_data_structures::sync::{DynSend, DynSync, try_par_for_each_in};
 use rustc_hir::def::{DefKind, Res};
-use rustc_hir::def_id::{DefId, LocalDefId, LocalDefIdMap, LocalModDefId};
-use rustc_hir::definitions::PerParentDisambiguatorState;
+use rustc_hir::def_id::{DefId, LocalDefId, LocalModDefId};
 use rustc_hir::*;
 use rustc_index::IndexVec;
 use rustc_macros::{Decodable, Encodable, HashStable};
-use rustc_span::{ErrorGuaranteed, ExpnId, HashStableContext, Span};
+use rustc_span::{ErrorGuaranteed, ExpnId, Span};
 
 use crate::query::Providers;
 use crate::ty::{ResolverAstLowering, TyCtxt};
@@ -40,11 +39,7 @@ pub struct Crate<'hir> {
     pub delayed_ids: FxIndexSet<LocalDefId>,
     // The resolver and AST crate which are set in the end of the `hir_crate` query
     // and then stolen and dropped in `force_delayed_owners_lowering`.
-    pub delayed_resolver: Steal<(
-        ResolverAstLowering<'hir>,
-        Arc<ast::Crate>,
-        Arc<LocalDefIdMap<Steal<PerParentDisambiguatorState>>>,
-    )>,
+    pub delayed_resolver: Steal<(ResolverAstLowering<'hir>, Arc<ast::Crate>)>,
     // Only present when incr. comp. is enabled.
     pub opt_hir_hash: Option<Fingerprint>,
 }
@@ -53,11 +48,7 @@ impl<'hir> Crate<'hir> {
     pub fn new(
         owners: IndexVec<LocalDefId, MaybeOwner<'hir>>,
         delayed_ids: FxIndexSet<LocalDefId>,
-        delayed_resolver: Steal<(
-            ResolverAstLowering<'hir>,
-            Arc<ast::Crate>,
-            Arc<LocalDefIdMap<Steal<PerParentDisambiguatorState>>>,
-        )>,
+        delayed_resolver: Steal<(ResolverAstLowering<'hir>, Arc<ast::Crate>)>,
         opt_hir_hash: Option<Fingerprint>,
     ) -> Crate<'hir> {
         Crate { owners, delayed_ids, delayed_resolver, opt_hir_hash }
@@ -85,8 +76,8 @@ impl<'hir> Crate<'hir> {
     }
 }
 
-impl<Hcx: HashStableContext> HashStable<Hcx> for Crate<'_> {
-    fn hash_stable(&self, hcx: &mut Hcx, hasher: &mut StableHasher) {
+impl HashStable for Crate<'_> {
+    fn hash_stable<Hcx: HashStableContext>(&self, hcx: &mut Hcx, hasher: &mut StableHasher) {
         let Crate { opt_hir_hash, .. } = self;
         opt_hir_hash.unwrap().hash_stable(hcx, hasher)
     }
