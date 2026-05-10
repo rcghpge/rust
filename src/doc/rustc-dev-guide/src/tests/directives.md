@@ -148,7 +148,8 @@ Some examples of `X` in `ignore-X` or `only-X`:
 - When particular debuggers are being tested: `cdb`, `gdb`, `lldb`
 - When particular debugger versions are matched: `ignore-gdb-version`
 - When the [parallel frontend] is enabled: `ignore-parallel-frontend`
-- Specific [compare modes]: `compare-mode-polonius`, `compare-mode-chalk`,
+- Specific [compare modes]: `compare-mode-polonius`,
+  `compare-mode-next-solver`, `compare-mode-next-solver-coherence`,
   `compare-mode-split-dwarf`, `compare-mode-split-dwarf-single`
 - The two different test modes used by coverage tests:
   `ignore-coverage-map`, `ignore-coverage-run`
@@ -183,8 +184,7 @@ The following directives will check rustc build settings and target settings:
 - `needs-threads` — ignores if the target does not have threading support
 - `needs-subprocess`  — ignores if the target does not have subprocess support
 - `needs-symlink` — ignores if the target does not support symlinks.
-  This can be the case on Windows if the developer did not enable privileged symlink
-  permissions.
+  This can be the case on Windows if the developer did not enable privileged symlink permissions.
 - `ignore-std-debug-assertions` — ignores if std was built with debug assertions.
 - `needs-std-debug-assertions` — ignores if std was not built with debug assertions.
 - `ignore-std-remap-debuginfo` — ignores if std was built with remapping of it's sources.

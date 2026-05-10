@@ -367,14 +367,15 @@ impl<'a> Parser<'a> {
         match (is_end_ahead, &self.token.kind) {
             (true, token::Or | token::OrOr) => {
                 // A `|` or possibly `||` token shouldn't be here. Ban it.
+                let token = pprust::token_to_string(&self.token);
                 self.dcx().emit_err(TrailingVertNotAllowed {
                     span: self.token.span,
                     start: lo,
                     suggestion: TrailingVertSuggestion {
                         span: self.prev_token.span.shrink_to_hi().with_hi(self.token.span.hi()),
-                        token: self.token,
+                        token: token.clone(),
                     },
-                    token: self.token,
+                    token,
                     note_double_vert: self.token.kind == token::OrOr,
                 });
                 self.bump();
@@ -502,7 +503,7 @@ impl<'a> Parser<'a> {
                 .create_err(UnexpectedExpressionInPattern {
                     span,
                     is_bound,
-                    expr_precedence: expr.precedence(),
+                    expr_precedence: expr.precedence() as u32,
                 })
                 .stash(span, StashKey::ExprInPat)
                 .unwrap(),
@@ -919,7 +920,7 @@ impl<'a> Parser<'a> {
             // The user probably mistook `...` for a rest pattern `..`.
             self.dcx().emit_err(DotDotDotRestPattern {
                 span: lo,
-                suggestion: Some(lo.with_lo(lo.hi() - BytePos(1))),
+                suggestion: Some(lo),
                 var_args: None,
             });
             PatKind::Rest

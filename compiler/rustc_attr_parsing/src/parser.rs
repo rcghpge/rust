@@ -202,7 +202,7 @@ impl ArgParser {
     /// Assert that there were no args.
     /// If there were, get a span to the arguments
     /// (to pass to [`AttributeDiagnosticContext::expected_no_args`](crate::context::AttributeDiagnosticContext::expected_no_args)).
-    pub fn no_args(&self) -> Result<(), Span> {
+    pub fn as_no_args(&self) -> Result<(), Span> {
         match self {
             Self::NoArgs => Ok(()),
             Self::List(args) => Err(args.span),
@@ -240,7 +240,7 @@ impl MetaItemOrLitParser {
         }
     }
 
-    pub fn lit(&self) -> Option<&MetaItemLit> {
+    pub fn as_lit(&self) -> Option<&MetaItemLit> {
         match self {
             MetaItemOrLitParser::Lit(meta_item_lit) => Some(meta_item_lit),
             MetaItemOrLitParser::MetaItemParser(_) => None,

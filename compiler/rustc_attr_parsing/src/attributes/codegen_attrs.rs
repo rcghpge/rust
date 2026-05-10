@@ -1,12 +1,12 @@
 use rustc_hir::attrs::{CoverageAttrKind, OptimizeAttr, RtsanSetting, SanitizerSet, UsedBy};
-use rustc_session::parse::feature_err;
+use rustc_session::errors::feature_err;
 use rustc_span::edition::Edition::Edition2024;
 
 use super::prelude::*;
 use crate::attributes::AttributeSafety;
 use crate::session_diagnostics::{
-    NakedFunctionIncompatibleAttribute, NullOnExport, NullOnObjcClass, NullOnObjcSelector,
-    ObjcClassExpectedStringLiteral, ObjcSelectorExpectedStringLiteral,
+    EmptyExportName, NakedFunctionIncompatibleAttribute, NullOnExport, NullOnObjcClass,
+    NullOnObjcSelector, ObjcClassExpectedStringLiteral, ObjcSelectorExpectedStringLiteral,
 };
 use crate::target_checking::Policy::AllowSilent;
 
@@ -54,7 +54,7 @@ impl NoArgsAttributeParser for ColdParser {
         Allow(Target::ForeignFn),
         Allow(Target::Closure),
     ]);
-    const CREATE: fn(Span) -> AttributeKind = AttributeKind::Cold;
+    const CREATE: fn(Span) -> AttributeKind = |_| AttributeKind::Cold;
 }
 
 pub(crate) struct CoverageParser;
@@ -94,7 +94,7 @@ impl SingleAttributeParser for CoverageParser {
             }
         };
 
-        Some(AttributeKind::Coverage(cx.attr_span, kind))
+        Some(AttributeKind::Coverage(kind))
     }
 }
 
@@ -119,14 +119,17 @@ impl SingleAttributeParser for ExportNameParser {
 
     fn convert(cx: &mut AcceptContext<'_, '_>, args: &ArgParser) -> Option<AttributeKind> {
         let nv = cx.expect_name_value(args, cx.attr_span, None)?;
-        let Some(name) = nv.value_as_str() else {
-            cx.adcx().expected_string_literal(nv.value_span, Some(nv.value_as_lit()));
-            return None;
-        };
+        let name = cx.expect_string_literal(nv)?;
         if name.as_str().contains('\0') {
             // `#[export_name = ...]` will be converted to a null-terminated string,
             // so it may not contain any null characters.
             cx.emit_err(NullOnExport { span: cx.attr_span });
+            return None;
+        }
+        if name.is_empty() {
+            // LLVM will make up a name if the empty string is given, but that name will be
+            // inconsistent between compilation units, causing linker errors.
+            cx.emit_err(EmptyExportName { span: cx.attr_span });
             return None;
         }
         Some(AttributeKind::ExportName { name, span: cx.attr_span })
@@ -156,7 +159,7 @@ impl SingleAttributeParser for RustcObjcClassParser {
             cx.emit_err(NullOnObjcClass { span: nv.value_span });
             return None;
         }
-        Some(AttributeKind::RustcObjcClass { classname, span: cx.attr_span })
+        Some(AttributeKind::RustcObjcClass { classname })
     }
 }
 
@@ -183,7 +186,7 @@ impl SingleAttributeParser for RustcObjcSelectorParser {
             cx.emit_err(NullOnObjcSelector { span: nv.value_span });
             return None;
         }
-        Some(AttributeKind::RustcObjcSelector { methname, span: cx.attr_span })
+        Some(AttributeKind::RustcObjcSelector { methname })
     }
 }
 
@@ -195,10 +198,9 @@ pub(crate) struct NakedParser {
 impl AttributeParser for NakedParser {
     const ATTRIBUTES: AcceptMapping<Self> =
         &[(&[sym::naked], template!(Word), |this, cx, args| {
-            if let Err(span) = args.no_args() {
-                cx.adcx().expected_no_args(span);
+            let Some(()) = cx.expect_no_args(args) else {
                 return;
-            }
+            };
 
             if let Some(earlier) = this.span {
                 let span = cx.attr_span;
@@ -265,10 +267,18 @@ impl AttributeParser for NakedParser {
 
         let span = self.span?;
 
+        let Some(tools) = cx.tools else {
+            unreachable!("tools required while parsing attributes");
+        };
+
         // only if we found a naked attribute do we do the somewhat expensive check
         'outer: for other_attr in cx.all_attrs {
             for allowed_attr in ALLOW_LIST {
-                if other_attr.segments().next().is_some_and(|i| cx.tools.contains(&i.name)) {
+                if other_attr
+                    .segments()
+                    .next()
+                    .is_some_and(|i| tools.iter().any(|tool| tool.name == i.name))
+                {
                     // effectively skips the error message  being emitted below
                     // if it's a tool attribute
                     continue 'outer;
@@ -437,9 +447,9 @@ impl AttributeParser for UsedParser {
         // If a specific form of `used` is specified, it takes precedence over generic `#[used]`.
         // If both `linker` and `compiler` are specified, use `linker`.
         Some(match (self.first_compiler, self.first_linker, self.first_default) {
-            (_, Some(span), _) => AttributeKind::Used { used_by: UsedBy::Linker, span },
-            (Some(span), _, _) => AttributeKind::Used { used_by: UsedBy::Compiler, span },
-            (_, _, Some(span)) => AttributeKind::Used { used_by: UsedBy::Default, span },
+            (_, Some(_), _) => AttributeKind::Used { used_by: UsedBy::Linker },
+            (Some(_), _, _) => AttributeKind::Used { used_by: UsedBy::Compiler },
+            (_, _, Some(_)) => AttributeKind::Used { used_by: UsedBy::Default },
             (None, None, None) => return None,
         })
     }
@@ -471,8 +481,7 @@ fn parse_tf_attribute(
         }
 
         // Use value
-        let Some(value_str) = value.value_as_str() else {
-            cx.adcx().expected_string_literal(value.value_span, Some(value.value_as_lit()));
+        let Some(value_str) = cx.expect_string_literal(value) else {
             return features;
         };
         for feature in value_str.as_str().split(",") {
@@ -587,8 +596,10 @@ impl SingleAttributeParser for SanitizeParser {
                         return;
                     }
                     None => {
-                        cx.adcx()
-                            .expected_string_literal(value.value_span, Some(value.value_as_lit()));
+                        cx.adcx().expected_specific_argument_strings(
+                            value.value_span,
+                            &[sym::on, sym::off],
+                        );
                         return;
                     }
                 };

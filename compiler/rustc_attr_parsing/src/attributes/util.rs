@@ -33,7 +33,7 @@ pub fn is_builtin_attr(attr: &ast::Attribute) -> bool {
 /// Parse a single integer.
 ///
 /// Used by attributes that take a single integer as argument, such as
-/// `#[link_ordinal]` and `#[rustc_layout_scalar_valid_range_start]`.
+/// `#[link_ordinal]`.
 /// `cx` is the context given to the attribute.
 /// `args` is the parser for the attribute arguments.
 pub(crate) fn parse_single_integer(
@@ -41,7 +41,7 @@ pub(crate) fn parse_single_integer(
     args: &ArgParser,
 ) -> Option<u128> {
     let single = cx.expect_single_element_list(args, cx.attr_span)?;
-    let Some(lit) = single.lit() else {
+    let Some(lit) = single.as_lit() else {
         cx.adcx().expected_integer_literal(single.span());
         return None;
     };
@@ -54,10 +54,7 @@ pub(crate) fn parse_single_integer(
 
 impl AcceptContext<'_, '_> {
     pub(crate) fn parse_limit_int(&mut self, nv: &NameValueParser) -> Option<Limit> {
-        let Some(limit) = nv.value_as_str() else {
-            self.adcx().expected_string_literal(nv.value_span, Some(nv.value_as_lit()));
-            return None;
-        };
+        let limit = self.expect_string_literal(nv)?;
 
         let error_str = match limit.as_str().parse() {
             Ok(i) => return Some(Limit::new(i)),

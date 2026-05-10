@@ -13,8 +13,9 @@ use rustc_parse::parser::{ForceCollect, Parser, Recovery};
 use rustc_parse::{exp, parse_in};
 use rustc_session::Session;
 use rustc_session::config::ExpectedValues;
+use rustc_session::errors::feature_err;
 use rustc_session::lint::builtin::UNEXPECTED_CFGS;
-use rustc_session::parse::{ParseSess, feature_err};
+use rustc_session::parse::ParseSess;
 use rustc_span::{ErrorGuaranteed, Span, Symbol, sym};
 use thin_vec::ThinVec;
 
@@ -134,12 +135,12 @@ fn parse_cfg_entry_version(
             cx.emit_err(session_diagnostics::ExpectedSingleVersionLiteral { span: list.span })
         );
     };
-    let Some(version_lit) = version.lit() else {
+    let Some(version_lit) = version.as_lit() else {
         return Err(
             cx.emit_err(session_diagnostics::ExpectedVersionLiteral { span: version.span() })
         );
     };
-    let Some(version_str) = version_lit.value_str() else {
+    let Some(version_str) = version_lit.value_as_str() else {
         return Err(
             cx.emit_err(session_diagnostics::ExpectedVersionLiteral { span: version_lit.span })
         );
