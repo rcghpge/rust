@@ -5,7 +5,7 @@ use rustc_errors::{
 };
 use rustc_macros::{Diagnostic, Subdiagnostic};
 use rustc_middle::ty::{self, Ty};
-use rustc_pattern_analysis::errors::Uncovered;
+use rustc_pattern_analysis::diagnostics::Uncovered;
 use rustc_pattern_analysis::rustc::RustcPatCtxt;
 use rustc_span::{Ident, Span, Symbol};
 
@@ -791,18 +791,6 @@ pub(crate) struct WantedConstant {
     pub(crate) is_typo: bool,
     pub(crate) const_name: String,
     pub(crate) const_path: String,
-}
-
-#[derive(Diagnostic)]
-#[diag("unreachable {$descr}")]
-pub(crate) struct UnreachableDueToUninhabited<'desc, 'tcx> {
-    pub descr: &'desc str,
-    #[label("unreachable {$descr}")]
-    pub expr: Span,
-    #[label("any code following this expression is unreachable")]
-    #[note("this expression has type `{$ty}`, which is uninhabited")]
-    pub orig: Span,
-    pub ty: Ty<'tcx>,
 }
 
 #[derive(Diagnostic)]
