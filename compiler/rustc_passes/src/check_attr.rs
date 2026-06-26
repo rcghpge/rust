@@ -24,8 +24,9 @@ use rustc_hir::def::DefKind;
 use rustc_hir::def_id::LocalModDefId;
 use rustc_hir::intravisit::{self, Visitor};
 use rustc_hir::{
-    self as hir, Attribute, CRATE_HIR_ID, Constness, FnSig, ForeignItem, GenericParamKind, HirId,
-    Item, ItemKind, MethodKind, Node, ParamName, Target, TraitItem, find_attr,
+    self as hir, Attribute, CRATE_HIR_ID, Constness, FnSig, ForeignItem, GenericParam,
+    GenericParamKind, HirId, Item, ItemKind, MethodKind, Node, ParamName, Target, TraitItem,
+    find_attr,
 };
 use rustc_macros::Diagnostic;
 use rustc_middle::hir::nested_filter;
@@ -193,12 +194,6 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
             AttributeKind::Inline(kind, attr_span) => {
                 self.check_inline(hir_id, *attr_span, kind, target)
             }
-            AttributeKind::LoopMatch(attr_span) => {
-                self.check_loop_match(hir_id, *attr_span, target)
-            }
-            AttributeKind::ConstContinue(attr_span) => {
-                self.check_const_continue(hir_id, *attr_span, target)
-            }
             AttributeKind::AllowInternalUnsafe(attr_span)
             | AttributeKind::AllowInternalUnstable(.., attr_span) => {
                 self.check_macro_only_attr(*attr_span, span, target, attrs)
@@ -218,7 +213,6 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
             &AttributeKind::RustcPubTransparent(attr_span) => {
                 self.check_rustc_pub_transparent(attr_span, span, attrs)
             }
-            AttributeKind::RustcAlign { .. } => {}
             AttributeKind::Naked(..) => self.check_naked(hir_id, target),
             AttributeKind::TrackCaller(attr_span) => {
                 self.check_track_caller(hir_id, *attr_span, attrs, target)
@@ -262,6 +256,7 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
             AttributeKind::Cold => (),
             AttributeKind::CollapseDebugInfo(..) => (),
             AttributeKind::CompilerBuiltins => (),
+            AttributeKind::ConstContinue(..) => {}
             AttributeKind::Coroutine => (),
             AttributeKind::Coverage(..) => (),
             AttributeKind::CrateName { .. } => (),
@@ -286,6 +281,7 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
             AttributeKind::LinkOrdinal { .. } => (),
             AttributeKind::LinkSection { .. } => (),
             AttributeKind::Linkage(..) => (),
+            AttributeKind::LoopMatch(..) => {}
             AttributeKind::MacroEscape => (),
             AttributeKind::MacroUse { .. } => (),
             AttributeKind::Marker => (),
@@ -317,6 +313,7 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
             // handled below this loop and elsewhere
             AttributeKind::Repr { .. } => (),
             AttributeKind::RustcAbi { .. } => (),
+            AttributeKind::RustcAlign { .. } => {}
             AttributeKind::RustcAllocator => (),
             AttributeKind::RustcAllocatorZeroed => (),
             AttributeKind::RustcAllocatorZeroedVariant { .. } => (),
@@ -345,6 +342,7 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
             AttributeKind::RustcDummy => (),
             AttributeKind::RustcDumpDefParents => (),
             AttributeKind::RustcDumpDefPath(..) => (),
+            AttributeKind::RustcDumpGenerics => (),
             AttributeKind::RustcDumpHiddenTypeOfOpaques => (),
             AttributeKind::RustcDumpInferredOutlives => (),
             AttributeKind::RustcDumpItemBounds => (),
@@ -890,7 +888,8 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
             | Target::Delegation { .. }
             | Target::Loop
             | Target::ForLoop
-            | Target::While => None,
+            | Target::While
+            | Target::Break => None,
         } {
             self.tcx.dcx().emit_err(diagnostics::DocAliasBadLocation { span, location });
             return;
@@ -1123,12 +1122,18 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
 
     /// Checks if `#[may_dangle]` is applied to a lifetime or type generic parameter in `Drop` impl.
     fn check_may_dangle(&self, hir_id: HirId, attr_span: Span) {
-        if let hir::Node::GenericParam(param) = self.tcx.hir_node(hir_id)
-            && matches!(
-                param.kind,
-                hir::GenericParamKind::Lifetime { .. } | hir::GenericParamKind::Type { .. }
-            )
-            && matches!(param.source, hir::GenericParamSource::Generics)
+        let hir::Node::GenericParam(
+            param @ GenericParam {
+                kind: hir::GenericParamKind::Lifetime { .. } | hir::GenericParamKind::Type { .. },
+                ..
+            },
+        ) = self.tcx.hir_node(hir_id)
+        else {
+            self.dcx().delayed_bug("Checked in attr parser");
+            return;
+        };
+
+        if matches!(param.source, hir::GenericParamSource::Generics)
             && let parent_hir_id = self.tcx.parent_hir_id(hir_id)
             && let hir::Node::Item(item) = self.tcx.hir_node(parent_hir_id)
             && let hir::ItemKind::Impl(impl_) = item.kind
@@ -1660,30 +1665,6 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
             self.dcx()
                 .emit_err(diagnostics::BothOptimizeNoneAndInline { optimize_span, inline_span });
         }
-    }
-
-    fn check_loop_match(&self, hir_id: HirId, attr_span: Span, target: Target) {
-        let node_span = self.tcx.hir_span(hir_id);
-
-        if !matches!(target, Target::Expression) {
-            return; // Handled in target checking during attr parse
-        }
-
-        if !matches!(self.tcx.hir_expect_expr(hir_id).kind, hir::ExprKind::Loop(..)) {
-            self.dcx().emit_err(diagnostics::LoopMatchAttr { attr_span, node_span });
-        };
-    }
-
-    fn check_const_continue(&self, hir_id: HirId, attr_span: Span, target: Target) {
-        let node_span = self.tcx.hir_span(hir_id);
-
-        if !matches!(target, Target::Expression) {
-            return; // Handled in target checking during attr parse
-        }
-
-        if !matches!(self.tcx.hir_expect_expr(hir_id).kind, hir::ExprKind::Break(..)) {
-            self.dcx().emit_err(diagnostics::ConstContinueAttr { attr_span, node_span });
-        };
     }
 }
 

@@ -1,4 +1,4 @@
-use rustc_errors::{Applicability, DiagArgValue, E0232, MultiSpan};
+use rustc_errors::{Applicability, DiagArgValue, E0232, E0264, MultiSpan};
 use rustc_hir::AttrPath;
 use rustc_macros::{Diagnostic, Subdiagnostic};
 use rustc_span::{Span, Symbol};
@@ -277,43 +277,6 @@ pub(crate) struct UnknownCrateTypesSuggestion {
     #[primary_span]
     pub span: Span,
     pub snippet: Symbol,
-}
-
-#[derive(Diagnostic)]
-#[diag("`#[diagnostic::on_const]` can only be applied to non-const trait implementations")]
-pub(crate) struct DiagnosticOnConstOnlyForTraitImpls {
-    #[label("not a trait implementation")]
-    pub target_span: Span,
-}
-
-#[derive(Diagnostic)]
-#[diag("`#[diagnostic::on_move]` can only be applied to enums, structs or unions")]
-pub(crate) struct DiagnosticOnMoveOnlyForAdt;
-
-#[derive(Diagnostic)]
-#[diag("`#[diagnostic::on_unimplemented]` can only be applied to trait definitions")]
-pub(crate) struct DiagnosticOnUnimplementedOnlyForTraits;
-
-#[derive(Diagnostic)]
-#[diag("`#[diagnostic::on_unknown]` can only be applied to `use` statements")]
-pub(crate) struct DiagnosticOnUnknownOnlyForImports {
-    #[label("not an import")]
-    pub target_span: Span,
-}
-
-#[derive(Diagnostic)]
-#[diag("`#[diagnostic::on_unmatched_args]` can only be applied to macro definitions")]
-pub(crate) struct DiagnosticOnUnmatchedArgsOnlyForMacros;
-
-#[derive(Diagnostic)]
-#[diag("`#[diagnostic::on_type_error]` can only be applied to enums, structs or unions")]
-pub(crate) struct DiagnosticOnTypeErrorOnlyForAdt;
-
-#[derive(Diagnostic)]
-#[diag("`#[diagnostic::do_not_recommend]` can only be placed on trait implementations")]
-pub(crate) struct IncorrectDoNotRecommendLocation {
-    #[label("not a trait implementation")]
-    pub target_span: Span,
 }
 
 #[derive(Diagnostic)]
@@ -837,4 +800,12 @@ pub(crate) struct DupesNotAllowed;
 pub(crate) struct UnsafeAttribute {
     pub attr_path: AttrPath,
     pub note: &'static str,
+}
+
+#[derive(Diagnostic)]
+#[diag("unknown external lang item: `{$lang_item}`", code = E0264)]
+pub(crate) struct UnknownExternLangItem {
+    #[primary_span]
+    pub span: Span,
+    pub lang_item: Symbol,
 }

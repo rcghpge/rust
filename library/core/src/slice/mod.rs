@@ -2530,6 +2530,7 @@ impl<T> [T] {
         F: FnMut(&T) -> bool,
     {
         let index = self.iter().position(pred)?;
+        // Slice bounds checks optimized are away (as of June 2026)
         Some((&self[..index], &self[index + 1..]))
     }
 
@@ -2558,6 +2559,7 @@ impl<T> [T] {
         F: FnMut(&T) -> bool,
     {
         let index = self.iter().rposition(pred)?;
+        // Slice bounds checks optimized are away (as of June 2026)
         Some((&self[..index], &self[index + 1..]))
     }
 
@@ -5298,7 +5300,6 @@ impl<T> [T] {
     /// # Examples
     /// Basic usage:
     /// ```
-    /// #![feature(substr_range)]
     /// use core::range::Range;
     ///
     /// let nums = &[0, 5, 10, 0, 0, 5];
@@ -5313,7 +5314,7 @@ impl<T> [T] {
     /// assert_eq!(iter.next(), Some(Range { start: 5, end: 6 }));
     /// ```
     #[must_use]
-    #[unstable(feature = "substr_range", issue = "126769")]
+    #[stable(feature = "substr_range", since = "CURRENT_RUSTC_VERSION")]
     pub fn subslice_range(&self, subslice: &[T]) -> Option<core::range::Range<usize>> {
         if T::IS_ZST {
             panic!("elements are zero-sized");

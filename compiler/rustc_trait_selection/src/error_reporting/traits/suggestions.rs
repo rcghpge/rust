@@ -128,7 +128,7 @@ pub fn suggest_restriction<'tcx, G: EmissionGuarantee>(
     msg: &str,
     err: &mut Diag<'_, G>,
     fn_sig: Option<&hir::FnSig<'_>>,
-    projection: Option<ty::AliasTy<'_>>,
+    projection: Option<ty::ProjectionAliasTy<'_>>,
     trait_pred: ty::PolyTraitPredicate<'tcx>,
     // When we are dealing with a trait, `super_traits` will be `Some`:
     // Given `trait T: A + B + C {}`
@@ -140,11 +140,8 @@ pub fn suggest_restriction<'tcx, G: EmissionGuarantee>(
     if hir_generics.where_clause_span.from_expansion()
         || hir_generics.where_clause_span.desugaring_kind().is_some()
         || projection.is_some_and(|projection| {
-            (tcx.is_impl_trait_in_trait(projection.kind.def_id())
-                && !tcx.features().return_type_notation())
-                || tcx
-                    .lookup_stability(projection.kind.def_id())
-                    .is_some_and(|stab| stab.is_unstable())
+            (tcx.is_impl_trait_in_trait(projection.kind) && !tcx.features().return_type_notation())
+                || tcx.lookup_stability(projection.kind).is_some_and(|stab| stab.is_unstable())
         })
     {
         return;
@@ -152,7 +149,7 @@ pub fn suggest_restriction<'tcx, G: EmissionGuarantee>(
     let generics = tcx.generics_of(item_id);
     // Given `fn foo(t: impl Trait)` where `Trait` requires assoc type `A`...
     if let Some((param, bound_str, fn_sig)) =
-        fn_sig.zip(projection).and_then(|(sig, p)| match *p.self_ty().kind() {
+        fn_sig.zip(projection).and_then(|(sig, p)| match *p.projection_self_ty().kind() {
             // Shenanigans to get the `Trait` from the `impl Trait`.
             ty::Param(param) => {
                 let param_def = generics.type_param(param, tcx);
@@ -479,8 +476,12 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
         let self_ty = trait_pred.skip_binder().self_ty();
         let (param_ty, projection) = match *self_ty.kind() {
             ty::Param(_) => (true, None),
-            ty::Alias(projection @ ty::AliasTy { kind: ty::Projection { .. }, .. }) => {
-                (false, Some(projection))
+            ty::Alias(_, alias) => {
+                if let Some(projection) = alias.try_to_projection() {
+                    (false, Some(projection))
+                } else {
+                    (false, None)
+                }
             }
             _ => (false, None),
         };
@@ -1483,7 +1484,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                         sig_parts.map_bound(|sig| sig.tupled_inputs_ty.tuple_fields().as_slice()),
                     ))
                 }
-                ty::Alias(ty::AliasTy { kind: ty::Opaque { def_id }, args, .. }) => {
+                ty::Alias(_, ty::AliasTy { kind: ty::Opaque { def_id }, args, .. }) => {
                     self.tcx
                         .item_self_bounds(def_id)
                         .instantiate(self.tcx, args)
@@ -3571,7 +3572,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                     }
                 }
                 let mut a = "a";
-                let mut this = "this bound".to_owned();
+                let mut this = "this bound";
                 let mut note = None;
                 let mut help = None;
                 if let ty::PredicateKind::Clause(clause) = predicate.kind().skip_binder() {
@@ -3598,14 +3599,16 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                                 tcx.visible_parent_map(()).get(&def_id).is_some()
                             };
                             if tcx.is_lang_item(def_id, LangItem::Sized) {
-                                if let Some(DesugaringKind::DefaultBound { def }) =
-                                    span.desugaring_kind()
+                                // Check if this is an implicit bound, even in foreign crates.
+                                if tcx
+                                    .generics_of(item_def_id)
+                                    .own_params
+                                    .iter()
+                                    .any(|param| tcx.def_span(param.def_id) == span)
                                 {
                                     a = "an implicit `Sized`";
-                                    this = format!(
-                                        "the implicit `Sized` requirement on this {}",
-                                        tcx.def_kind(def).descr(def)
-                                    );
+                                    this =
+                                        "the implicit `Sized` requirement on this type parameter";
                                 }
                                 if let Some(hir::Node::TraitItem(hir::TraitItem {
                                     generics,
@@ -4048,7 +4051,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                                 }
                             }
                         }
-                        ty::Alias(ty::AliasTy { kind: ty::Opaque { def_id }, .. }) => {
+                        ty::Alias(_, ty::AliasTy { kind: ty::Opaque { def_id }, .. }) => {
                             // If the previous type is async fn, this is the future generated by the body of an async function.
                             // Avoid printing it twice (it was already printed in the `ty::Coroutine` arm below).
                             let is_future = tcx.ty_is_opaque_future(ty);
@@ -4215,8 +4218,12 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                             // implicit, mention it as such.
                             if let Some(pred) = predicate.as_trait_clause()
                                 && self.tcx.is_lang_item(pred.def_id(), LangItem::Sized)
-                                && let Some(DesugaringKind::DefaultBound { .. }) =
-                                    data.span.desugaring_kind()
+                                && self
+                                    .tcx
+                                    .generics_of(data.impl_or_alias_def_id)
+                                    .own_params
+                                    .iter()
+                                    .any(|param| self.tcx.def_span(param.def_id) == data.span)
                             {
                                 spans.push_span_label(
                                     data.span,
@@ -4527,6 +4534,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
         let projection_ty = trait_pred.map_bound(|trait_pred| {
             Ty::new_projection(
                 self.tcx,
+                ty::IsRigid::No,
                 item_def_id,
                 // Future::Output has no args
                 [trait_pred.self_ty()],
@@ -4871,7 +4879,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                             .skip_binder()
                             .projection_term
                             .expect_ty()
-                            .to_ty(self.tcx),
+                            .to_ty(self.tcx, ty::IsRigid::No),
                         found,
                     })];
                 }
@@ -4969,7 +4977,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
 
             // Extract `<U as Deref>::Target` assoc type and check that it is `T`
             && let Some(deref_target_did) = tcx.lang_items().deref_target()
-            && let projection = Ty::new_projection_from_args(tcx,deref_target_did, tcx.mk_args(&[ty::GenericArg::from(found_ty)]))
+            && let projection = Ty::new_projection_from_args(tcx,ty::IsRigid::No, deref_target_did, tcx.mk_args(&[ty::GenericArg::from(found_ty)]))
             && let InferOk { value: deref_target, obligations } = infcx.at(&ObligationCause::dummy(), param_env).normalize(Unnormalized::new_wip(projection))
             && obligations.iter().all(|obligation| infcx.predicate_must_hold_modulo_regions(obligation))
             && infcx.can_eq(param_env, deref_target, target_ty)
@@ -5331,7 +5339,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
             let TypeError::Sorts(expected_found) = diff else {
                 continue;
             };
-            let &ty::Alias(ty::AliasTy { kind: kind @ ty::Projection { def_id }, .. }) =
+            let &ty::Alias(_, ty::AliasTy { kind: kind @ ty::Projection { def_id }, .. }) =
                 expected_found.expected.kind()
             else {
                 continue;
@@ -5659,7 +5667,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
         }
 
         // Look for an RPITIT
-        let ty::Alias(alias_ty @ ty::AliasTy { kind: ty::Projection { def_id }, .. }) =
+        let ty::Alias(_, alias_ty @ ty::AliasTy { kind: ty::Projection { def_id }, .. }) =
             trait_pred.self_ty().skip_binder().kind()
         else {
             return;
@@ -5906,11 +5914,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
         let sized_trait = self.tcx.lang_items().sized_trait();
         debug!(?generics.params);
         debug!(?generics.predicates);
-        let Some(DesugaringKind::DefaultBound { def }) = span.desugaring_kind() else {
-            return;
-        };
-        let Some(param) = generics.params.iter().find(|param| param.def_id.to_def_id() == def)
-        else {
+        let Some(param) = generics.params.iter().find(|param| param.span == span) else {
             return;
         };
         // Check that none of the explicit trait bounds is `Sized`. Assume that an explicit

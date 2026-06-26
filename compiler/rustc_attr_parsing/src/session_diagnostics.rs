@@ -337,13 +337,17 @@ pub(crate) struct InvalidTarget {
     pub target: &'static str,
     pub applied: DiagArgValue,
     pub only: &'static str,
-    pub attribute_args: &'static str,
+    pub attribute_args: String,
     #[subdiagnostic]
     pub help: Option<InvalidTargetHelp>,
     #[warning(
         "this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!"
     )]
     pub previously_accepted: bool,
+    #[note(
+        "placing this attribute on a macro invocation does nothing even if the macro expands to what would be a valid target for the attribute"
+    )]
+    pub on_macro_call: bool,
 }
 
 #[derive(Subdiagnostic)]
