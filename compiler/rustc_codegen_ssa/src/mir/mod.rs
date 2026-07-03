@@ -269,7 +269,7 @@ pub fn codegen_mir<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     // monomorphization, and if there is an error during collection then codegen never starts -- so
     // we don't have to do it again.
 
-    fx.fill_function_debug_context();
+    fx.fill_function_debug_context(&mut start_bx);
 
     let (per_local_var_debug_info, consts_debug_info) =
         fx.compute_per_local_var_debug_info(&mut start_bx).unzip();
@@ -433,6 +433,7 @@ fn arg_local_refs<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
             let arg_decl = &mir.local_decls[local];
             let arg_ty = fx.monomorphize(arg_decl.ty);
 
+            // FIXME(splat): re-tuple splatted arguments that were un-tupled in the ABI
             if Some(local) == mir.spread_arg {
                 // This argument (e.g., the last argument in the "rust-call" ABI)
                 // is a tuple that was spread at the ABI level and now we have

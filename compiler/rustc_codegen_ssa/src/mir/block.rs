@@ -686,7 +686,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             }
             _ => (
                 false,
-                bx.get_fn_addr(drop_fn),
+                bx.get_fn_addr(drop_fn, Some(PacMetadata::default())),
                 bx.fn_abi_of_instance(drop_fn, ty::List::empty()),
                 drop_fn,
             ),
@@ -1097,7 +1097,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                         )
                         .unwrap();
 
-                        (None, Some(bx.get_fn_addr(instance)))
+                        (None, Some(bx.get_fn_addr(instance, Some(PacMetadata::default()))))
                     }
                     _ => (Some(instance), None),
                 }
@@ -1202,6 +1202,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         };
 
         // Split the rust-call tupled arguments off.
+        // FIXME(splat): un-tuple splatted arguments in codegen, for performance
         let (first_args, untuple) = if sig.abi() == ExternAbi::RustCall
             && let Some((tup, args)) = args.split_last()
         {
@@ -1409,7 +1410,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         }
 
         let fn_ptr = match (instance, llfn) {
-            (Some(instance), None) => bx.get_fn_addr(instance),
+            (Some(instance), None) => bx.get_fn_addr(instance, Some(PacMetadata::default())),
             (_, Some(llfn)) => llfn,
             _ => span_bug!(fn_span, "no instance or llfn for call"),
         };

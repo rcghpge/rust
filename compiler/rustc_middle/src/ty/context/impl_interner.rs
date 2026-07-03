@@ -41,7 +41,7 @@ impl<'tcx> Interner for TyCtxt<'tcx> {
     type CoroutineId = DefId;
     type AdtId = DefId;
     type ImplId = DefId;
-    type UnevaluatedConstId = DefId;
+    type AnonConstId = DefId;
     type TraitAssocTyId = DefId;
     type TraitAssocConstId = DefId;
     type TraitAssocTermId = DefId;
@@ -208,23 +208,20 @@ impl<'tcx> Interner for TyCtxt<'tcx> {
         self.adt_def(adt_def_id)
     }
 
-    fn unevaluated_const_kind_from_def_id(
-        self,
-        def_id: Self::DefId,
-    ) -> ty::UnevaluatedConstKind<'tcx> {
+    fn alias_const_kind_from_def_id(self, def_id: Self::DefId) -> ty::AliasConstKind<'tcx> {
         match self.def_kind(def_id) {
             DefKind::AssocConst { .. } => {
                 if let DefKind::Impl { of_trait: false } = self.def_kind(self.parent(def_id)) {
-                    ty::UnevaluatedConstKind::Inherent { def_id }
+                    ty::AliasConstKind::Inherent { def_id }
                 } else {
-                    ty::UnevaluatedConstKind::Projection { def_id }
+                    ty::AliasConstKind::Projection { def_id }
                 }
             }
-            DefKind::Const { .. } => ty::UnevaluatedConstKind::Free { def_id },
+            DefKind::Const { .. } => ty::AliasConstKind::Free { def_id },
             DefKind::AnonConst | DefKind::InlineConst | DefKind::Ctor(_, CtorKind::Const) => {
-                ty::UnevaluatedConstKind::Anon { def_id }
+                ty::AliasConstKind::Anon { def_id }
             }
-            kind => bug!("unexpected DefKind in UnevaluatedConst: {kind:?}"),
+            kind => bug!("unexpected DefKind in AliasConst: {kind:?}"),
         }
     }
 
@@ -247,7 +244,7 @@ impl<'tcx> Interner for TyCtxt<'tcx> {
             DefKind::OpaqueTy => ty::AliasTermKind::OpaqueTy { def_id },
             DefKind::TyAlias => ty::AliasTermKind::FreeTy { def_id },
             DefKind::Const { .. } => ty::AliasTermKind::FreeConst { def_id },
-            DefKind::AnonConst | DefKind::Ctor(_, CtorKind::Const) => {
+            DefKind::AnonConst | DefKind::InlineConst | DefKind::Ctor(_, CtorKind::Const) => {
                 ty::AliasTermKind::AnonConst { def_id }
             }
             kind => bug!("unexpected DefKind in AliasTy: {kind:?}"),
@@ -544,8 +541,7 @@ impl<'tcx> Interner for TyCtxt<'tcx> {
     // only want to consider types that *actually* unify with float/int vars.
     fn for_each_relevant_impl<R: VisitorResult>(
         self,
-        trait_def_id: DefId,
-        self_ty: Ty<'tcx>,
+        trait_ref: ty::TraitRef<'tcx>,
         mut f: impl FnMut(DefId) -> R,
     ) -> R {
         macro_rules! ret {
@@ -557,6 +553,8 @@ impl<'tcx> Interner for TyCtxt<'tcx> {
             };
         }
 
+        let trait_def_id = trait_ref.def_id;
+        let self_ty = trait_ref.self_ty();
         let tcx = self;
         let trait_impls = tcx.trait_impls_of(trait_def_id);
         let mut consider_impls_for_simplified_type = |simp| {

@@ -334,7 +334,6 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
             return;
         }
 
-        let fn_body_hir_id = self.tcx.local_def_id_to_hir_id(typeck_results.hir_owner.def_id);
         let mut private_candidate: Option<(Ty<'tcx>, Ty<'tcx>, Span)> = None;
 
         for (deref_base_ty, _) in (self.autoderef_steps)(base_ty) {
@@ -346,8 +345,11 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                 continue;
             }
 
-            let (adjusted_ident, def_scope) =
-                self.tcx.adjust_ident_and_get_scope(field_ident, base_def.did(), fn_body_hir_id);
+            let (adjusted_ident, def_scope) = self.tcx.adjust_ident_and_get_scope(
+                field_ident,
+                base_def.did(),
+                typeck_results.hir_owner.def_id,
+            );
 
             let Some((_, field_def)) =
                 base_def.non_enum_variant().fields.iter_enumerated().find(|(_, field)| {
@@ -2556,6 +2558,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
         err.children.clear();
 
         let mut span = obligation.cause.span;
+        let mut is_async_fn_return = false;
         if let DefKind::Closure = self.tcx.def_kind(obligation.cause.body_id)
             && let parent = self.tcx.local_parent(obligation.cause.body_id)
             && let DefKind::Fn | DefKind::AssocFn = self.tcx.def_kind(parent)
@@ -2571,9 +2574,18 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
             // and
             // async fn foo() -> dyn Display Box<dyn { .. }>
             span = fn_sig.decl.output.span();
+            is_async_fn_return = true;
             err.span(span);
         }
         let body = self.tcx.hir_body_owned_by(obligation.cause.body_id);
+
+        if !is_async_fn_return
+            && let Node::Expr(hir::Expr { kind: hir::ExprKind::Closure(closure), .. }) =
+                self.tcx.hir_node_by_def_id(obligation.cause.body_id)
+            && matches!(closure.fn_decl.output, hir::FnRetTy::DefaultReturn(_))
+        {
+            return true;
+        }
 
         let mut visitor = ReturnsVisitor::default();
         visitor.visit_body(&body);
@@ -4962,6 +4974,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
             && let fn_sig @ ty::FnSig {
                 ..
             } = fn_ty.fn_sig(tcx).skip_binder()
+            // FIXME(splat): this might need to change if the Fn* traits start using/supporting splat
             && fn_sig.abi() == ExternAbi::Rust
             && !fn_sig.c_variadic()
             && fn_sig.safety() == hir::Safety::Safe

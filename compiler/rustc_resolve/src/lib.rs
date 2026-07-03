@@ -77,6 +77,7 @@ use smallvec::{SmallVec, smallvec};
 use tracing::{debug, instrument};
 
 use crate::error_helper::OnUnknownData;
+use crate::imports::NameResolutionRef;
 use crate::ref_mut::{CmCell, CmRefCell};
 
 mod build_reduced_graph;
@@ -186,7 +187,6 @@ struct InvocationParent {
     parent_def: LocalDefId,
     impl_trait_context: ImplTraitContext,
     in_attr: bool,
-    const_arg_context: ConstArgContext,
     owner: NodeId,
 }
 
@@ -195,7 +195,6 @@ impl InvocationParent {
         parent_def: CRATE_DEF_ID,
         impl_trait_context: ImplTraitContext::Existential,
         in_attr: false,
-        const_arg_context: ConstArgContext::NonDirect,
         owner: CRATE_NODE_ID,
     };
 }
@@ -205,13 +204,6 @@ enum ImplTraitContext {
     Existential,
     Universal,
     InBinding,
-}
-
-#[derive(Copy, Clone, Debug)]
-enum ConstArgContext {
-    Direct,
-    /// Either inside of an `AnonConst` or not inside a const argument at all.
-    NonDirect,
 }
 
 /// Used for tracking import use types which will be used for redundant import checking.
@@ -639,7 +631,7 @@ impl BindingKey {
     }
 }
 
-type Resolutions<'ra> = CmRefCell<FxIndexMap<BindingKey, &'ra CmRefCell<NameResolution<'ra>>>>;
+type Resolutions<'ra> = CmRefCell<FxIndexMap<BindingKey, NameResolutionRef<'ra>>>;
 
 /// One node in the tree of modules.
 ///
@@ -992,7 +984,7 @@ impl<'ra> fmt::Debug for LocalModule<'ra> {
 }
 
 /// Data associated with any name declaration.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct DeclData<'ra> {
     kind: DeclKind<'ra>,
     ambiguity: CmCell<Option<(Decl<'ra>, bool /*warning*/)>>,
@@ -1026,7 +1018,7 @@ impl std::hash::Hash for DeclData<'_> {
 }
 
 /// Name declaration kind.
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 enum DeclKind<'ra> {
     /// The name declaration is a definition (possibly without a `DefId`),
     /// can be provided by source code or built into the language.
@@ -1597,11 +1589,10 @@ impl<'ra> ResolverArenas<'ra> {
     fn alloc_import(&'ra self, import: ImportData<'ra>) -> Import<'ra> {
         Interned::new_unchecked(self.imports.alloc(import))
     }
-    fn alloc_name_resolution(
-        &'ra self,
-        orig_ident_span: Span,
-    ) -> &'ra CmRefCell<NameResolution<'ra>> {
-        self.name_resolutions.alloc(CmRefCell::new(NameResolution::new(orig_ident_span)))
+    fn alloc_name_resolution(&'ra self, orig_ident_span: Span) -> NameResolutionRef<'ra> {
+        Interned::new_unchecked(
+            self.name_resolutions.alloc(CmRefCell::new(NameResolution::new(orig_ident_span))),
+        )
     }
     fn alloc_macro_rules_scope(&'ra self, scope: MacroRulesScope<'ra>) -> MacroRulesScopeRef<'ra> {
         self.dropless.alloc(CacheCell::new(scope))
@@ -2082,17 +2073,18 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
             self.tcx
                 .sess
                 .time("finalize_macro_resolutions", || self.finalize_macro_resolutions(krate));
-            self.tcx.sess.time("late_resolve_crate", || self.late_resolve_crate(krate));
+            let use_items =
+                self.tcx.sess.time("late_resolve_crate", || self.late_resolve_crate(krate));
             self.tcx.sess.time("resolve_main", || self.resolve_main());
-            self.tcx.sess.time("resolve_check_unused", || self.check_unused(krate));
+            self.tcx.sess.time("resolve_check_unused", || self.check_unused(use_items));
             self.tcx.sess.time("resolve_report_errors", || self.report_errors(krate));
             self.tcx
                 .sess
                 .time("resolve_postprocess", || self.cstore_mut().postprocess(self.tcx, krate));
         });
 
-        // Make sure we don't mutate the cstore from here on.
-        self.tcx.untracked().cstore.freeze();
+        // Don't mutate the cstore or stable crate id map from here on.
+        self.tcx.untracked().freeze_cstore();
     }
 
     fn traits_in_scope(
@@ -2212,7 +2204,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
         module: Module<'ra>,
         key: BindingKey,
     ) -> Option<Ref<'ra, NameResolution<'ra>>> {
-        self.resolutions(module).borrow().get(&key).map(|resolution| resolution.borrow())
+        self.resolutions(module).borrow().get(&key).map(|resolution| resolution.0.borrow())
     }
 
     fn resolution_or_default(
@@ -2220,8 +2212,9 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
         module: Module<'ra>,
         key: BindingKey,
         orig_ident_span: Span,
-    ) -> &'ra CmRefCell<NameResolution<'ra>> {
-        self.resolutions(module)
+    ) -> NameResolutionRef<'ra> {
+        *self
+            .resolutions(module)
             .borrow_mut_unchecked()
             .entry(key)
             .or_insert_with(|| self.arenas.alloc_name_resolution(orig_ident_span))
@@ -2832,8 +2825,6 @@ type CmResolver<'r, 'ra, 'tcx> = ref_mut::RefOrMut<'r, Resolver<'ra, 'tcx>>;
 // parallel name resolution.
 use std::cell::{Cell as CacheCell, RefCell as CacheRefCell};
 
-// FIXME: `*_unchecked` methods in the module below should be eliminated in the process
-// of migration to parallel name resolution.
 mod ref_mut {
     use std::cell::{BorrowMutError, Cell, Ref, RefCell, RefMut};
     use std::fmt;
@@ -2941,6 +2932,8 @@ mod ref_mut {
         }
 
         #[track_caller]
+        // FIXME: this should be eliminated in the process of migration
+        // to parallel name resolution.
         pub(crate) fn borrow_mut_unchecked(&self) -> RefMut<'_, T> {
             self.0.borrow_mut()
         }
@@ -2951,10 +2944,6 @@ mod ref_mut {
                 panic!("not allowed to mutably borrow a `CmRefCell` during speculative resolution");
             }
             self.0.borrow_mut()
-        }
-
-        pub(crate) fn try_borrow_mut_unchecked(&self) -> Result<RefMut<'_, T>, BorrowMutError> {
-            self.0.try_borrow_mut()
         }
 
         #[track_caller]

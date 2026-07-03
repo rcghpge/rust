@@ -317,6 +317,13 @@ fn opaque_types_defined_by<'tcx>(
     tcx: TyCtxt<'tcx>,
     item: LocalDefId,
 ) -> &'tcx ty::List<LocalDefId> {
+    // Closures and coroutines are type checked with their parent
+    // Note that we also support `SyntheticCoroutineBody` since we create
+    // a MIR body for the def kind, and some MIR passes (like promotion)
+    // may require doing analysis using its typing env.
+    if tcx.is_typeck_child(item.to_def_id()) {
+        return tcx.opaque_types_defined_by(tcx.local_parent(item));
+    }
     let kind = tcx.def_kind(item);
     trace!(?kind);
     let mut collector = OpaqueTypeCollector::new(tcx, item);
@@ -329,15 +336,12 @@ fn opaque_types_defined_by<'tcx>(
         | DefKind::Static { .. }
         | DefKind::Const { .. }
         | DefKind::AssocConst { .. }
-        | DefKind::AnonConst => {
+        | DefKind::AnonConst
+        | DefKind::InlineConst => {
+            // Non-type-system inline consts should be caught by `if tcx.is_typeck_child` above
+            debug_assert!(kind != DefKind::InlineConst || tcx.is_type_system_inline_const(item));
+
             collector.collect_taits_declared_in_body();
-        }
-        // Closures and coroutines are type checked with their parent
-        // Note that we also support `SyntheticCoroutineBody` since we create
-        // a MIR body for the def kind, and some MIR passes (like promotion)
-        // may require doing analysis using its typing env.
-        DefKind::Closure | DefKind::InlineConst | DefKind::SyntheticCoroutineBody => {
-            collector.opaques.extend(tcx.opaque_types_defined_by(tcx.local_parent(item)));
         }
         DefKind::AssocTy | DefKind::TyAlias | DefKind::GlobalAsm => {}
         DefKind::OpaqueTy
@@ -349,6 +353,8 @@ fn opaque_types_defined_by<'tcx>(
         | DefKind::Trait
         | DefKind::ForeignTy
         | DefKind::TraitAlias
+        | DefKind::Closure
+        | DefKind::SyntheticCoroutineBody
         | DefKind::TyParam
         | DefKind::ConstParam
         | DefKind::Ctor(_, _)
