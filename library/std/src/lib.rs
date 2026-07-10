@@ -276,6 +276,7 @@
 #![feature(asm_experimental_arch)]
 #![feature(autodiff)]
 #![feature(cfg_sanitizer_cfi)]
+#![feature(cfg_target_has_threads)]
 #![feature(cfg_target_thread_local)]
 #![feature(cfi_encoding)]
 #![feature(const_trait_impl)]
@@ -286,6 +287,7 @@
 #![feature(doc_masked)]
 #![feature(doc_notable_trait)]
 #![feature(dropck_eyepatch)]
+#![feature(exact_div)]
 #![feature(f16)]
 #![feature(f128)]
 #![feature(ffi_const)]
@@ -374,6 +376,7 @@
 #![feature(random)]
 #![feature(raw_os_error_ty)]
 #![feature(seek_io_take_position)]
+#![feature(seek_stream_len)]
 #![feature(share_trait)]
 #![feature(slice_internals)]
 #![feature(slice_ptr_get)]
@@ -640,6 +643,9 @@ pub mod process;
 pub mod random;
 pub mod sync;
 pub mod time;
+#[cfg_attr(feature = "nightly", not(bootstrap))]
+#[unstable(feature = "view_type_macro", issue = "155938")]
+pub mod view;
 
 // Pull in `std_float` crate  into std. The contents of
 // `std_float` are in a different repository: rust-lang/portable-simd.

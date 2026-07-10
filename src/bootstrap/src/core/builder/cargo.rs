@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use super::{Builder, Kind};
 use crate::core::build_steps::test;
 use crate::core::build_steps::tool::SourceType;
-use crate::core::config::SplitDebuginfo;
 use crate::core::config::flags::Color;
+use crate::core::config::{CompressDebuginfo, SplitDebuginfo};
 use crate::utils::build_stamp;
 use crate::utils::helpers::{self, LldThreads, check_cfg_arg, linker_flags};
 use crate::{
@@ -75,6 +75,26 @@ impl Rustflags {
             self.env("RUSTFLAGS_BOOTSTRAP");
             self.arg("--cfg=bootstrap");
         }
+    }
+}
+
+/// Picks the environment variable and value to pass a set of [`Rustflags`] to cargo.
+///
+/// `flags` is the `\x1f`-separated string built by [`Rustflags`]. We prefer the plain,
+/// space-separated form (`RUSTFLAGS`/`RUSTDOCFLAGS`) so the command stays readable and
+/// copy-pasteable in bootstrap's debug output, and only fall back to the `CARGO_ENCODED_*` form
+/// (which keeps the `\x1f` separators) when a flag value contains a space that the plain,
+/// whitespace-split form can't represent. See <https://github.com/rust-lang/rust/issues/158749>.
+pub(super) fn flags_env(
+    plain: &'static str,
+    encoded: &'static str,
+    flags: &str,
+) -> (&'static str, String) {
+    // A space can only appear inside a flag value, since the separators are `\x1f`.
+    if flags.contains(' ') {
+        (encoded, flags.to_string())
+    } else {
+        (plain, flags.replace('\x1f', " "))
     }
 }
 
@@ -348,8 +368,23 @@ impl Cargo {
             self.rustdocflags.arg(&arg);
         }
 
-        if !builder.config.dry_run() && builder.cc[&target].args().iter().any(|arg| arg == "-gz") {
-            self.rustflags.arg("-Clink-arg=-gz");
+        match builder.config.compress_debuginfo(target) {
+            CompressDebuginfo::Zlib => {
+                // Do not enable Zlib compression on:
+                // - Windows, because MSVC/PDB doesn't support it
+                // - macOS, because its linker doesn't know the flag
+                if !self.target.is_windows() && !self.target.is_apple() {
+                    // If we link through cc, we need the -Wl prefix.
+                    // If we don't, then we must not add it, because the linker wouldn't
+                    // understand it.
+                    if helpers::use_host_linker(target) {
+                        self.rustflags.arg("-Clink-arg=-Wl,--compress-debug-sections=zlib");
+                    } else {
+                        self.rustflags.arg("-Clink-arg=--compress-debug-sections=zlib");
+                    }
+                }
+            }
+            CompressDebuginfo::Off => {}
         }
 
         // Ignore linker warnings for now. These are complicated to fix and don't affect the build.
@@ -465,21 +500,25 @@ impl From<Cargo> for BootstrapCommand {
 
         cargo.command.args(cargo.args);
 
-        // Always unset the plain RUSTFLAGS/RUSTDOCFLAGS so that downstream
-        // tools (e.g. build.rs scripts) see only the encoded form. Any flags
-        // from the caller's environment have already been folded into the
-        // Rustflags struct via `propagate_cargo_env`.
+        // Unset any inherited flag variables (plain and encoded) so cargo uses only the flags
+        // bootstrap sets below. Flags from the caller's environment have already been folded into
+        // the Rustflags struct via `propagate_cargo_env`. This also matters because we may set the
+        // plain form below, which cargo ignores when `CARGO_ENCODED_RUSTFLAGS` is also present.
         cargo.command.env_remove("RUSTFLAGS");
+        cargo.command.env_remove("CARGO_ENCODED_RUSTFLAGS");
         cargo.command.env_remove("RUSTDOCFLAGS");
+        cargo.command.env_remove("CARGO_ENCODED_RUSTDOCFLAGS");
 
-        let rustflags = &cargo.rustflags.0;
-        if !rustflags.is_empty() {
-            cargo.command.env("CARGO_ENCODED_RUSTFLAGS", rustflags);
+        if !cargo.rustflags.0.is_empty() {
+            let (var, value) =
+                flags_env("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", &cargo.rustflags.0);
+            cargo.command.env(var, value);
         }
 
-        let rustdocflags = &cargo.rustdocflags.0;
-        if !rustdocflags.is_empty() {
-            cargo.command.env("CARGO_ENCODED_RUSTDOCFLAGS", rustdocflags);
+        if !cargo.rustdocflags.0.is_empty() {
+            let (var, value) =
+                flags_env("RUSTDOCFLAGS", "CARGO_ENCODED_RUSTDOCFLAGS", &cargo.rustdocflags.0);
+            cargo.command.env(var, value);
         }
 
         let encoded_hostflags = cargo.hostflags.encode();

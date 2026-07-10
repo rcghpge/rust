@@ -1621,7 +1621,7 @@ pub mod parse {
         let mut seen_instruction_threshold = false;
         let mut seen_skip_entry = false;
         let mut seen_skip_exit = false;
-        for option in v.into_iter().flat_map(|v| v.split(',')) {
+        for option in v.map(|v| v.split(',')).into_flat_iter() {
             match option {
                 "always" if !seen_always && !seen_never => {
                     options.always = true;
@@ -2298,6 +2298,8 @@ options! {
         `=LooseTypes`
         `=Inline`
         Multiple options can be combined with commas."),
+    autodiff_post_passes: Option<String> = (None, parse_opt_string, [TRACKED],
+        "set llvm passes to run after enzyme (no passes run when it is empty)"),
     #[rustc_lint_opt_deny_field_access("use `Session::binary_dep_depinfo` instead of this field")]
     binary_dep_depinfo: bool = (false, parse_bool, [TRACKED],
         "include artifacts (sysroot, crate dependencies) used during compilation in dep-info \
@@ -2351,6 +2353,8 @@ options! {
         "disable various performance optimizations in trait solving"),
     disable_incr_comp_backend_caching: bool = (false, parse_bool, [TRACKED],
         "disable caching of compiled objects by the codegen backend during incremental compilation"),
+    disable_param_env_normalization_hack: bool = (false, parse_bool, [TRACKED],
+        "do not treat all aliases in the environment as rigid with `-Znext-solver`"),
     dual_proc_macros: bool = (false, parse_bool, [TRACKED],
         "load proc macros for both target and host, but only link to the target (default: no)"),
     dump_dep_graph: bool = (false, parse_bool, [UNTRACKED],
@@ -2417,6 +2421,9 @@ options! {
     fmt_debug: FmtDebug = (FmtDebug::Full, parse_fmt_debug, [TRACKED],
         "how detailed `#[derive(Debug)]` should be. `full` prints types recursively, \
         `shallow` prints only type names, `none` prints nothing and disables `{:?}`. (default: `full`)"),
+    force_intrinsic_fallback: bool = (false, parse_bool, [TRACKED],
+        "always use the fallback body of an intrinsic, if it has one, instead of lowering \
+        the intrinsic in the codegen backend (default: no)."),
     force_unstable_if_unmarked: bool = (false, parse_bool, [TRACKED],
         "force all crates to be `rustc_private` unstable (default: no)"),
     function_return: FunctionReturn = (FunctionReturn::default(), parse_function_return, [TRACKED],

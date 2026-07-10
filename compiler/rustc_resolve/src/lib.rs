@@ -15,6 +15,7 @@
 #![feature(default_field_values)]
 #![feature(deref_patterns)]
 #![feature(iter_intersperse)]
+#![feature(option_into_flat_iter)]
 #![feature(rustc_attrs)]
 #![feature(trim_prefix_suffix)]
 #![recursion_limit = "256"]
@@ -682,8 +683,8 @@ struct ModuleData<'ra> {
     self_decl: Option<Decl<'ra>>,
 }
 
-/// All modules are unique and allocated on a same arena,
-/// so we can use referential equality to compare them.
+/// `Interned` is used because values of this type have "identity" and compare as unequal even if
+/// they have the same contents.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 #[rustc_pass_by_value]
 struct Module<'ra>(Interned<'ra, ModuleData<'ra>>);
@@ -697,19 +698,6 @@ struct LocalModule<'ra>(Interned<'ra, ModuleData<'ra>>);
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 #[rustc_pass_by_value]
 struct ExternModule<'ra>(Interned<'ra, ModuleData<'ra>>);
-
-// Allows us to use Interned without actually enforcing (via Hash/PartialEq/...) uniqueness of the
-// contained data.
-// FIXME: We may wish to actually have at least debug-level assertions that Interned's guarantees
-// are upheld.
-impl std::hash::Hash for ModuleData<'_> {
-    fn hash<H>(&self, _: &mut H)
-    where
-        H: std::hash::Hasher,
-    {
-        unreachable!()
-    }
-}
 
 impl<'ra> ModuleData<'ra> {
     fn new(
@@ -915,6 +903,7 @@ impl<'ra> LocalModule<'ra> {
         assert!(kind.is_local());
         let parent = parent.map(|m| m.to_module());
         let data = ModuleData::new(parent, kind, expn_id, span, no_implicit_prelude, vis, arenas);
+        // SAFETY: `Interned` is valid because values of this type have "identity".
         LocalModule(Interned::new_unchecked(arenas.modules.alloc(data)))
     }
 
@@ -936,6 +925,7 @@ impl<'ra> ExternModule<'ra> {
         assert!(!kind.is_local());
         let parent = parent.map(|m| m.to_module());
         let data = ModuleData::new(parent, kind, expn_id, span, no_implicit_prelude, vis, arenas);
+        // SAFETY: `Interned` is valid because values of this type have "identity".
         ExternModule(Interned::new_unchecked(arenas.modules.alloc(data)))
     }
 
@@ -1000,22 +990,9 @@ struct DeclData<'ra> {
     parent_module: Option<Module<'ra>>,
 }
 
-/// All name declarations are unique and allocated on a same arena,
-/// so we can use referential equality to compare them.
+/// `Interned` is used because values of this type have "identity" and compare as unequal even if
+/// they have the same contents.
 type Decl<'ra> = Interned<'ra, DeclData<'ra>>;
-
-// Allows us to use Interned without actually enforcing (via Hash/PartialEq/...) uniqueness of the
-// contained data.
-// FIXME: We may wish to actually have at least debug-level assertions that Interned's guarantees
-// are upheld.
-impl std::hash::Hash for DeclData<'_> {
-    fn hash<H>(&self, _: &mut H)
-    where
-        H: std::hash::Hasher,
-    {
-        unreachable!()
-    }
-}
 
 /// Name declaration kind.
 #[derive(Debug)]
@@ -1584,12 +1561,15 @@ impl<'ra> ResolverArenas<'ra> {
     }
 
     fn alloc_decl(&'ra self, data: DeclData<'ra>) -> Decl<'ra> {
+        // SAFETY: `Interned` is valid because values of this type have "identity".
         Interned::new_unchecked(self.dropless.alloc(data))
     }
     fn alloc_import(&'ra self, import: ImportData<'ra>) -> Import<'ra> {
+        // SAFETY: `Interned` is valid because values of this type have "identity".
         Interned::new_unchecked(self.imports.alloc(import))
     }
     fn alloc_name_resolution(&'ra self, orig_ident_span: Span) -> NameResolutionRef<'ra> {
+        // SAFETY: `Interned` is valid because values of this type have "identity".
         Interned::new_unchecked(
             self.name_resolutions.alloc(CmRefCell::new(NameResolution::new(orig_ident_span))),
         )

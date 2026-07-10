@@ -511,7 +511,7 @@ impl<'hir, Unambig> ConstArg<'hir, Unambig> {
 #[derive(Clone, Copy, Debug, StableHash)]
 #[repr(u8, C)]
 pub enum ConstArgKind<'hir, Unambig = ()> {
-    Tup(&'hir [&'hir ConstArg<'hir, Unambig>]),
+    Tup(&'hir [&'hir ConstArg<'hir>]),
     /// **Note:** Currently this is only used for bare const params
     /// (`N` where `fn foo<const N: usize>(...)`),
     /// not paths to any const (`N` where `const N: usize = ...`).
@@ -3877,7 +3877,7 @@ pub enum DelegationSelfTyPropagationKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, StableHash)]
 pub struct DelegationInfo {
     pub call_expr_id: HirId,
-    pub call_path_res: Option<DefId>,
+    pub call_path_res: DefId,
 
     /// Id of the child segment in delegation: `reuse Trait::foo`,
     /// `child_seg_id` points to `foo`.
