@@ -26,7 +26,7 @@ use rustc_sanitizers::{cfi, kcfi};
 use rustc_session::config::OptLevel;
 use rustc_span::Span;
 use rustc_target::callconv::{FnAbi, PassMode};
-use rustc_target::spec::{Arch, HasTargetSpec, LlvmAbi, SanitizerSet, Target};
+use rustc_target::spec::{Arch, HasTargetSpec, SanitizerSet, Target};
 use smallvec::SmallVec;
 use tracing::{debug, instrument};
 
@@ -871,8 +871,7 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         unsafe {
             let store = llvm::LLVMBuildStore(self.llbuilder, val, ptr);
             let align = align.min(self.cx().tcx.sess.target.max_reliable_alignment());
-            let align =
-                if flags.contains(MemFlags::UNALIGNED) { 1 } else { align.bytes() as c_uint };
+            let align = align.bytes() as c_uint;
             llvm::LLVMSetAlignment(store, align);
             if flags.contains(MemFlags::VOLATILE) {
                 llvm::LLVMSetVolatile(store, llvm::TRUE);
@@ -2040,7 +2039,7 @@ impl<'a, 'll, 'tcx> Builder<'a, 'll, 'tcx> {
         llfn: &'ll Value,
         fn_abi: Option<&FnAbi<'tcx, Ty<'tcx>>>,
     ) -> Option<llvm::OperandBundleBox<'ll>> {
-        if self.sess().target.llvm_abiname != LlvmAbi::Pauthtest {
+        if self.sess().pointer_authentication_functions().is_none() {
             return None;
         }
         // Pointer authentication support is currently limited to extern "C" calls; filter out other

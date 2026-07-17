@@ -26,7 +26,6 @@ use std::time::{Instant, SystemTime};
 use std::{env, fs, io, str};
 
 use build_helper::ci::gha;
-use build_helper::exit;
 use cc::Tool;
 use termcolor::{ColorChoice, StandardStream, WriteColor};
 use utils::build_stamp::BuildStamp;
@@ -42,9 +41,9 @@ use crate::utils::helpers::{self, dir_is_empty, exe, libdir, set_file_times, spl
 mod core;
 mod utils;
 
-pub use core::builder::PathSet;
 #[cfg(feature = "tracing")]
 pub use core::builder::STEP_SPAN_TARGET;
+pub use core::builder::{PathSet, StepStack};
 pub use core::config::flags::{Flags, Subcommand};
 pub use core::config::{ChangeId, Config};
 
@@ -1736,7 +1735,9 @@ impl Build {
                 }
             }
         }
-        ret.sort_unstable_by_key(|krate| krate.name.clone()); // reproducible order needed for tests
+
+        // Sort the crates so that bootstrap unit tests can assume a deterministic order.
+        ret.sort_unstable_by(|a, b| Ord::cmp(&a.name, &b.name));
         ret
     }
 
@@ -2148,4 +2149,11 @@ pub fn prepare_behaviour_dump_dir(build: &Build) {
 
         t!(INITIALIZED.set(true));
     }
+}
+
+#[macro_export]
+macro_rules! exit {
+    ($code:expr) => {
+        $crate::utils::helpers::detail_exit($code, cfg!(test));
+    };
 }

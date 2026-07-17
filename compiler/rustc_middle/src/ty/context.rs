@@ -601,14 +601,8 @@ impl<'tcx> TyCtxt<'tcx> {
     /// effect. However, we do not want this as a general capability, so this interface restricts
     /// to the only allowed case.
     pub fn feed_anon_const_type(self, key: LocalDefId, value: ty::EarlyBinder<'tcx, Ty<'tcx>>) {
-        if cfg!(debug_assertions) {
-            match self.def_kind(key) {
-                DefKind::AnonConst => (),
-                DefKind::InlineConst => assert!(self.is_type_system_inline_const(key)),
-                def_kind => bug!("unexpected DefKind in feed_anon_const_type: {def_kind:?}"),
-            }
-        }
-
+        debug_assert_eq!(self.def_kind(key), DefKind::AnonConst);
+        debug_assert!(self.anon_const_kind(key) != ty::AnonConstKind::NonTypeSystemInline);
         TyCtxtFeed { tcx: self, key }.type_of(value)
     }
 
@@ -626,7 +620,7 @@ impl<'tcx> TyCtxt<'tcx> {
                 other => bug!("{key:?} is not an assoc item of a trait impl: {other:?}"),
             }
         }
-        TyCtxtFeed { tcx: self, key }.visibility(vis.to_def_id())
+        TyCtxtFeed { tcx: self, key }.visibility(vis.to_mod_id())
     }
 }
 
@@ -855,7 +849,6 @@ impl<'tcx> TyCtxt<'tcx> {
             DefKind::AnonConst
                 | DefKind::AssocConst { .. }
                 | DefKind::Const { .. }
-                | DefKind::InlineConst
                 | DefKind::GlobalAsm
         ) {
             CodegenFnAttrs::EMPTY
@@ -1331,8 +1324,8 @@ impl<'tcx> TyCtxt<'tcx> {
         // Visibilities for opaque types are meaningless, but still provided
         // so that all items have visibilities.
         if matches!(def_kind, DefKind::Closure | DefKind::OpaqueTy) {
-            let parent_mod = self.parent_module_from_def_id(def_id).to_def_id();
-            feed.visibility(ty::Visibility::Restricted(parent_mod));
+            let parent_mod = self.parent_module_from_def_id(def_id);
+            feed.visibility(ty::Visibility::Restricted(parent_mod.to_mod_id()));
         }
 
         feed
