@@ -686,11 +686,11 @@ impl<'rt, 'tcx, M: Machine<'tcx>> ValidityVisitor<'rt, 'tcx, M> {
             )
         }
         // Do not allow references to uninhabited types.
-        if place.layout.is_uninhabited() {
+        if !place.layout.ty.is_opsem_inhabited(*self.ecx.tcx, self.ecx.typing_env) {
             let ty = place.layout.ty;
             throw_validation_failure!(
                 self.path,
-                format!("encountered a {ptr_kind} pointing to uninhabited type {ty}")
+                format!("encountered a {ptr_kind} pointing to uninhabited type `{ty}`")
             )
         }
 
@@ -1524,8 +1524,9 @@ impl<'rt, 'tcx, M: Machine<'tcx>> ValueVisitor<'tcx, M> for ValidityVisitor<'rt,
         }
 
         // Assert that we checked everything there is to check about this type.
+        // `is_opsem_inhabited` implies that the layout is inhabited (checked by layout invariants).
         assert!(
-            !val.layout.is_uninhabited(),
+            val.layout.ty.is_opsem_inhabited(*self.ecx.tcx, self.ecx.typing_env),
             "a value of type `{}` passed validation but that type is uninhabited",
             val.layout.ty
         );

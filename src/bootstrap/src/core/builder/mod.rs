@@ -13,7 +13,7 @@ use clap::ValueEnum;
 #[cfg(feature = "tracing")]
 use tracing::instrument;
 
-pub use self::cargo::{Cargo, cargo_profile_var};
+pub use self::cargo::{Cargo, apply_pgo, cargo_profile_var};
 pub use crate::Compiler;
 use crate::core::build_steps::compile::{Std, StdLink};
 use crate::core::build_steps::tool::RustcPrivateCompilers;
@@ -947,7 +947,6 @@ impl<'a> Builder<'a> {
                 test::Clippy,
                 test::CompiletestTest,
                 test::StdarchVerify,
-                test::IntrinsicTest,
                 test::CrateRunMakeSupport,
                 test::CrateBuildHelper,
                 test::RustdocJSStd,
@@ -963,6 +962,7 @@ impl<'a> Builder<'a> {
                 test::RunMake,
                 test::RunMakeCargo,
                 test::BuildStd,
+                test::IntrinsicTest,
             ),
             Kind::Miri => describe!(test::Crate),
             Kind::Bench => describe!(test::Crate, test::CrateLibrustc, test::CrateRustdoc),

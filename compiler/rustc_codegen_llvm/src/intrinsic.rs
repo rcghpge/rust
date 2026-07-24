@@ -9,7 +9,7 @@ use rustc_abi::{
 use rustc_codegen_ssa::RetagInfo;
 use rustc_codegen_ssa::base::{compare_simd_types, wants_msvc_seh, wants_wasm_eh};
 use rustc_codegen_ssa::common::{IntPredicate, TypeKind};
-use rustc_codegen_ssa::errors::{ExpectedPointerMutability, InvalidMonomorphization};
+use rustc_codegen_ssa::diagnostics::{ExpectedPointerMutability, InvalidMonomorphization};
 use rustc_codegen_ssa::mir::IntrinsicResult;
 use rustc_codegen_ssa::mir::operand::{OperandRef, OperandValue};
 use rustc_codegen_ssa::mir::place::{PlaceRef, PlaceValue};
@@ -962,6 +962,7 @@ impl<'ll, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
         for arg in args {
             match arg.val {
                 OperandValue::ZeroSized => {}
+                OperandValue::Uninit => {}
                 OperandValue::Immediate(a) => llargs.push(a),
                 OperandValue::Pair(a, b) => {
                     llargs.push(a);
@@ -1939,7 +1940,7 @@ fn get_args_from_tuple<'ll, 'tcx>(
             result
         }
 
-        OperandValue::ZeroSized => vec![],
+        OperandValue::ZeroSized | OperandValue::Uninit => vec![],
     }
 }
 

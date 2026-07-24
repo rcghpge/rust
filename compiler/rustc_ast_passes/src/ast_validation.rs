@@ -514,22 +514,19 @@ impl<'a> AstValidator<'a> {
     }
 
     fn check_decl_attrs(&self, fn_decl: &FnDecl) {
+        use SyntheticAttr::*;
         fn_decl
             .inputs
             .iter()
             .flat_map(|i| i.attrs.as_ref())
-            .filter(|attr| {
-                let arr = [
-                    sym::allow,
-                    sym::cfg_trace,
-                    sym::cfg_attr_trace,
-                    sym::deny,
-                    sym::expect,
-                    sym::forbid,
-                    sym::splat,
-                    sym::warn,
-                ];
-                !attr.has_any_name(&arr) && rustc_attr_parsing::is_builtin_attr(*attr)
+            .filter(|attr| match &attr.kind {
+                AttrKind::Normal(normal) => {
+                    let arr =
+                        [sym::allow, sym::deny, sym::expect, sym::forbid, sym::splat, sym::warn];
+                    !attr.has_any_name(&arr) && rustc_attr_parsing::is_builtin_attr(&normal.item)
+                }
+                AttrKind::Synthetic(CfgTrace(_) | CfgAttrTrace) => false,
+                AttrKind::DocComment(..) => true,
             })
             .for_each(|attr| {
                 if attr.is_doc_comment() {
@@ -1547,9 +1544,9 @@ impl Visitor<'_> for AstValidator<'_> {
                     visit::walk_item(this, item)
                 });
             }
-            ItemKind::Const(ConstItem { defaultness, ident, rhs_kind, .. }) => {
+            ItemKind::Const(ConstItem { defaultness, ident, body, .. }) => {
                 self.check_defaultness(item.span, *defaultness, AllowDefault::No, AllowFinal::No);
-                if !rhs_kind.has_expr() {
+                if body.is_none() {
                     self.dcx().emit_err(diagnostics::ConstWithoutBody {
                         span: item.span,
                         replace_span: self.ending_semi_or_hi(item.span),
@@ -1944,8 +1941,8 @@ impl Visitor<'_> for AstValidator<'_> {
 
         if let AssocCtxt::Impl { .. } = ctxt {
             match &item.kind {
-                AssocItemKind::Const(ConstItem { rhs_kind, .. }) => {
-                    if !rhs_kind.has_expr() {
+                AssocItemKind::Const(ConstItem { body, .. }) => {
+                    if body.is_none() {
                         self.dcx().emit_err(diagnostics::AssocConstWithoutBody {
                             span: item.span,
                             replace_span: self.ending_semi_or_hi(item.span),
