@@ -2875,49 +2875,50 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
         cause: &ObligationCauseCode<'tcx>,
         err: &mut Diag<'_>,
     ) {
-        // First, look for an `WhereClauseInExpr`, which means we can get
+        // First, look for a `WhereClauseInExpr`, which means we can get
         // the uninstantiated predicate list of the called function. And check
         // that the predicate that we failed to satisfy is a `Fn`-like trait.
         if let ObligationCauseCode::WhereClauseInExpr(def_id, _, _, idx) = *cause
-            && let predicates = self.tcx.predicates_of(def_id).instantiate_identity(self.tcx)
-            && let Some(pred) = predicates.predicates.get(idx).map(|p| p.as_ref().skip_norm_wip())
-            && let ty::ClauseKind::Trait(trait_pred) = pred.kind().skip_binder()
+            && let gen_clauses = self.tcx.clauses_of(def_id).instantiate_identity(self.tcx)
+            && let Some(clause) = gen_clauses.clauses.get(idx).map(|c| c.as_ref().skip_norm_wip())
+            && let ty::ClauseKind::Trait(trait_pred) = clause.kind().skip_binder()
             && self.tcx.is_fn_trait(trait_pred.def_id())
         {
             let expected_self =
-                self.tcx.anonymize_bound_vars(pred.kind().rebind(trait_pred.self_ty()));
+                self.tcx.anonymize_bound_vars(clause.kind().rebind(trait_pred.self_ty()));
             let expected_args =
-                self.tcx.anonymize_bound_vars(pred.kind().rebind(trait_pred.trait_ref.args));
+                self.tcx.anonymize_bound_vars(clause.kind().rebind(trait_pred.trait_ref.args));
 
-            // Find another predicate whose self-type is equal to the expected self type,
+            // Find another clause whose self-type is equal to the expected self type,
             // but whose args don't match.
-            let other_pred = predicates.into_iter().enumerate().find(|&(other_idx, (pred, _))| {
-                let pred = pred.skip_norm_wip();
-                match pred.kind().skip_binder() {
-                    ty::ClauseKind::Trait(trait_pred)
-                        if self.tcx.is_fn_trait(trait_pred.def_id())
+            let other_clause =
+                gen_clauses.into_iter().enumerate().find(|&(other_idx, (clause, _))| {
+                    let clause = clause.skip_norm_wip();
+                    match clause.kind().skip_binder() {
+                        ty::ClauseKind::Trait(trait_pred)
+                            if self.tcx.is_fn_trait(trait_pred.def_id())
                             && other_idx != idx
                             // Make sure that the self type matches
                             // (i.e. constraining this closure)
                             && expected_self
                                 == self.tcx.anonymize_bound_vars(
-                                    pred.kind().rebind(trait_pred.self_ty()),
+                                    clause.kind().rebind(trait_pred.self_ty()),
                                 )
                             // But the args don't match (i.e. incompatible args)
                             && expected_args
                                 != self.tcx.anonymize_bound_vars(
-                                    pred.kind().rebind(trait_pred.trait_ref.args),
+                                    clause.kind().rebind(trait_pred.trait_ref.args),
                                 ) =>
-                    {
-                        true
+                        {
+                            true
+                        }
+                        _ => false,
                     }
-                    _ => false,
-                }
-            });
+                });
             // If we found one, then it's very likely the cause of the error.
-            if let Some((_, (_, other_pred_span))) = other_pred {
+            if let Some((_, (_, other_clause_span))) = other_clause {
                 err.span_note(
-                    other_pred_span,
+                    other_clause_span,
                     "closure inferred to have a different signature due to this bound",
                 );
             }
@@ -4897,9 +4898,8 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
             let mut type_diffs = vec![];
             if let ObligationCauseCode::WhereClauseInExpr(def_id, _, _, idx) = *parent_code
                 && let Some(node_args) = typeck_results.node_args_opt(call_hir_id)
-                && let where_clauses =
-                    self.tcx.predicates_of(def_id).instantiate(self.tcx, node_args)
-                && let Some(where_pred) = where_clauses.predicates.get(idx)
+                && let where_clauses = self.tcx.clauses_of(def_id).instantiate(self.tcx, node_args)
+                && let Some(where_pred) = where_clauses.clauses.get(idx)
             {
                 let where_pred = where_pred.as_ref().skip_norm_wip();
                 if let Some(where_pred) = where_pred.as_trait_clause()
@@ -5487,81 +5487,83 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
         if !matches!(tcx.def_kind(body_def_id), DefKind::Fn | DefKind::AssocFn) {
             return;
         }
-        let output =
-            tcx.fn_sig(body_def_id).instantiate_identity().skip_norm_wip().output().skip_binder();
-        let &ty::Alias(_, ty::AliasTy { kind: ty::Opaque { def_id: opaque_def_id }, args, .. }) =
-            output.kind()
-        else {
-            return;
-        };
 
-        // The predicate that reaches here has been rewritten through the impls it was
-        // derived from (e.g. `Iterator for Map<I, F>` turns `Iterator::Item` requirements
-        // into requirements on `F`'s return type), so the associated types the user wrote
-        // in the signature are recovered from the opaque's bounds instead.
-        let mut probe_diffs = vec![];
-        for clause in tcx.item_bounds(opaque_def_id).instantiate(tcx, args).skip_norm_wip() {
-            let Some(proj) = clause.as_projection_clause() else { continue };
-            let proj = self.instantiate_binder_with_fresh_vars(
-                expr.span,
-                BoundRegionConversionTime::FnCall,
-                proj,
-            );
-            let Some(expected_term) = proj.term.as_type() else { continue };
-            // Only the projection (for its `DefId`) is used when probing the chain; the
-            // bound's own term is carried in `found` for the divergence check below and
-            // is replaced with the probed type afterwards.
-            probe_diffs.push(TypeError::Sorts(ty::error::ExpectedFound {
-                expected: proj.projection_term.expect_ty().to_ty(tcx, ty::IsRigid::No),
-                found: expected_term,
-            }));
-        }
-        if probe_diffs.is_empty() {
-            return;
-        }
-
-        // If the returned expression is a binding, walk the chain that created it instead.
-        let expr = if let hir::ExprKind::Path(hir::QPath::Resolved(None, path)) = expr.kind
-            && let hir::Path { res: Res::Local(hir_id), .. } = path
-            && let hir::Node::Pat(binding) = tcx.hir_node(*hir_id)
-            && let hir::Node::LetStmt(local) = tcx.parent_hir_node(binding.hir_id)
-            && let Some(binding_expr) = local.init
-        {
-            binding_expr
-        } else {
-            expr
-        };
-
-        // Resolve what each bound associated type actually is for the returned expression,
-        // and keep only the ones that diverged from the signature.
-        let expr_ty = self.resolve_vars_if_possible(
-            typeck_results.expr_ty_adjusted_opt(expr).unwrap_or(Ty::new_misc_error(tcx)),
-        );
-        let assocs = self.probe_assoc_types_at_expr(
-            &probe_diffs,
-            expr.span,
-            expr_ty,
-            expr.hir_id,
-            param_env,
-        );
-        let mut type_diffs = vec![];
-        for (probe_diff, assoc) in iter::zip(probe_diffs, assocs) {
-            let TypeError::Sorts(ty::error::ExpectedFound { expected, found: expected_term }) =
-                probe_diff
+        let binder = tcx.fn_sig(body_def_id).instantiate_identity().skip_norm_wip().output();
+        self.enter_forall(binder, |output| {
+            let &ty::Alias(_, ty::AliasTy { kind: ty::Opaque { def_id: opaque_def_id }, args, .. }) =
+                output.kind()
             else {
-                continue;
+                return;
             };
-            let Some((_, (_, actual_ty))) = assoc else { continue };
-            if !self.can_eq(param_env, expected_term, actual_ty) {
-                type_diffs.push(TypeError::Sorts(ty::error::ExpectedFound {
-                    expected,
-                    found: actual_ty,
+
+            // The predicate that reaches here has been rewritten through the impls it was
+            // derived from (e.g. `Iterator for Map<I, F>` turns `Iterator::Item` requirements
+            // into requirements on `F`'s return type), so the associated types the user wrote
+            // in the signature are recovered from the opaque's bounds instead.
+            let mut probe_diffs = vec![];
+            for clause in tcx.item_bounds(opaque_def_id).instantiate(tcx, args).skip_norm_wip() {
+                let Some(proj) = clause.as_projection_clause() else { continue };
+                let proj = self.instantiate_binder_with_fresh_vars(
+                    expr.span,
+                    BoundRegionConversionTime::FnCall,
+                    proj,
+                );
+                let Some(expected_term) = proj.term.as_type() else { continue };
+                // Only the projection (for its `DefId`) is used when probing the chain; the
+                // bound's own term is carried in `found` for the divergence check below and
+                // is replaced with the probed type afterwards.
+                probe_diffs.push(TypeError::Sorts(ty::error::ExpectedFound {
+                    expected: proj.projection_term.expect_ty().to_ty(tcx, ty::IsRigid::No),
+                    found: expected_term,
                 }));
             }
-        }
-        if !type_diffs.is_empty() {
-            self.point_at_chain(expr, typeck_results, type_diffs, param_env, err);
-        }
+            if probe_diffs.is_empty() {
+                return;
+            }
+
+            // If the returned expression is a binding, walk the chain that created it instead.
+            let expr = if let hir::ExprKind::Path(hir::QPath::Resolved(None, path)) = expr.kind
+                && let hir::Path { res: Res::Local(hir_id), .. } = path
+                && let hir::Node::Pat(binding) = tcx.hir_node(*hir_id)
+                && let hir::Node::LetStmt(local) = tcx.parent_hir_node(binding.hir_id)
+                && let Some(binding_expr) = local.init
+            {
+                binding_expr
+            } else {
+                expr
+            };
+
+            // Resolve what each bound associated type actually is for the returned expression,
+            // and keep only the ones that diverged from the signature.
+            let expr_ty = self.resolve_vars_if_possible(
+                typeck_results.expr_ty_adjusted_opt(expr).unwrap_or(Ty::new_misc_error(tcx)),
+            );
+            let assocs = self.probe_assoc_types_at_expr(
+                &probe_diffs,
+                expr.span,
+                expr_ty,
+                expr.hir_id,
+                param_env,
+            );
+            let mut type_diffs = vec![];
+            for (probe_diff, assoc) in iter::zip(probe_diffs, assocs) {
+                let TypeError::Sorts(ty::error::ExpectedFound { expected, found: expected_term }) =
+                    probe_diff
+                else {
+                    continue;
+                };
+                let Some((_, (_, actual_ty))) = assoc else { continue };
+                if !self.can_eq(param_env, expected_term, actual_ty) {
+                    type_diffs.push(TypeError::Sorts(ty::error::ExpectedFound {
+                        expected,
+                        found: actual_ty,
+                    }));
+                }
+            }
+            if !type_diffs.is_empty() {
+                self.point_at_chain(expr, typeck_results, type_diffs, param_env, err);
+            }
+        });
     }
 
     /// If the type that failed selection is an array or a reference to an array,

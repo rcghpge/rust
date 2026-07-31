@@ -4,8 +4,9 @@ use std::fmt::Debug;
 
 use rustc_ast as ast;
 use rustc_ast::NodeId;
-use rustc_data_structures::unord::UnordMap;
+use rustc_data_structures::fx::FxIndexMap;
 use rustc_error_messages::{DiagArgValue, IntoDiagArg};
+use rustc_hir_id::HirId;
 use rustc_macros::{Decodable, Encodable, StableHash};
 use rustc_span::Symbol;
 use rustc_span::def_id::{DefId, LocalDefId};
@@ -472,7 +473,7 @@ impl DefKind {
 ///   pointing to the definition of `str_to_string` in the current crate.
 //
 #[derive(Clone, Copy, PartialEq, Eq, Encodable, Decodable, Hash, Debug, StableHash)]
-pub enum Res<Id = hir::HirId> {
+pub enum Res<Id = HirId> {
     /// Definition having a unique ID (`DefId`), corresponds to something defined in user code.
     ///
     /// **Not bound to a specific namespace.**
@@ -962,4 +963,6 @@ pub enum LifetimeRes {
     ElidedAnchor { start: NodeId, end: NodeId },
 }
 
-pub type DocLinkResMap = UnordMap<(Symbol, Namespace), Option<Res<NodeId>>>;
+// FxIndexMap is necessary because its data ends up in .rmeta files,
+// so its iteration order must be consistent. See #159677 for context.
+pub type DocLinkResMap = FxIndexMap<(Symbol, Namespace), Option<Res<NodeId>>>;

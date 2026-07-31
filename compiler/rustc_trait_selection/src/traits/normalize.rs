@@ -144,7 +144,7 @@ pub(super) fn needs_normalization<'tcx, T: TypeVisitable<TyCtxt<'tcx>>>(
         | TypingMode::Typeck { .. }
         | TypingMode::PostTypeckUntilBorrowck { .. }
         | TypingMode::PostBorrowck { .. } => flags.remove(ty::TypeFlags::HAS_TY_OPAQUE),
-        TypingMode::PostAnalysis | TypingMode::Codegen => {}
+        TypingMode::Reflection | TypingMode::PostAnalysis | TypingMode::Codegen => {}
     }
 
     value.has_type_flags(flags)
@@ -324,20 +324,20 @@ impl<'a, 'b, 'tcx> AssocTypeNormalizer<'a, 'b, 'tcx> {
         self.obligations.extend(
             infcx
                 .tcx
-                .predicates_of(def_id)
+                .clauses_of(def_id)
                 .instantiate_own(infcx.tcx, free.args)
-                .map(|(pred, span)| (pred.skip_norm_wip(), span))
-                .map(|(mut predicate, span)| {
+                .map(|(clause, span)| (clause.skip_norm_wip(), span))
+                .map(|(mut clause, span)| {
                     if free.has_escaping_bound_vars() {
-                        (predicate, ..) = BoundVarReplacer::replace_bound_vars(
+                        (clause, ..) = BoundVarReplacer::replace_bound_vars(
                             infcx,
                             &mut self.universes,
-                            predicate,
+                            clause,
                         );
                     }
                     let mut cause = self.cause.clone();
                     cause.map_code(|code| ObligationCauseCode::TypeAlias(code, span, def_id));
-                    Obligation::new(infcx.tcx, cause, self.param_env, predicate)
+                    Obligation::new(infcx.tcx, cause, self.param_env, clause)
                 }),
         );
         self.depth += 1;
@@ -433,7 +433,7 @@ impl<'a, 'b, 'tcx> TypeFolder<TyCtxt<'tcx>> for AssocTypeNormalizer<'a, 'b, 'tcx
                     | TypingMode::Typeck { .. }
                     | TypingMode::PostTypeckUntilBorrowck { .. }
                     | TypingMode::PostBorrowck { .. } => ty.super_fold_with(self),
-                    TypingMode::PostAnalysis | TypingMode::Codegen => {
+                    TypingMode::Reflection | TypingMode::PostAnalysis | TypingMode::Codegen => {
                         let recursion_limit = self.cx().recursion_limit();
                         if !recursion_limit.value_within_limit(self.depth) {
                             self.selcx.infcx.err_ctxt().report_overflow_error(

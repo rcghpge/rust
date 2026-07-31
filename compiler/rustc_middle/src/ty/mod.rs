@@ -16,6 +16,7 @@ use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::num::NonZero;
+use std::ops::ControlFlow;
 use std::ptr::NonNull;
 use std::{assert_matches, fmt, iter, str};
 
@@ -30,7 +31,7 @@ use rustc_abi::{
 use rustc_ast::node_id::NodeMap;
 use rustc_ast::{self as ast, NodeId};
 pub use rustc_ast_ir::{Movability, Mutability, try_visit};
-use rustc_data_structures::fx::{FxIndexMap, FxIndexSet};
+use rustc_data_structures::fx::{FxHashSet, FxIndexMap, FxIndexSet};
 use rustc_data_structures::intern::Interned;
 use rustc_data_structures::stable_hash::{StableHash, StableHashCtxt, StableHasher};
 use rustc_data_structures::steal::Steal;
@@ -307,6 +308,64 @@ pub struct ImplTraitHeader<'tcx> {
     pub polarity: ImplPolarity,
     pub safety: hir::Safety,
     pub constness: hir::Constness,
+}
+
+impl<'tcx> ImplTraitHeader<'tcx> {
+    /// For trait impls, checks whether
+    /// * the type and trait only use generic lifetime arguments (and no concrete ones like `'static`), and
+    /// * uses any generic param (lifetime or type) only once.
+    ///
+    /// This is a pessimistic analysis, so it will reject alias types
+    /// and other types that may be actually ok. We can allow more in the future.
+    ///
+    /// Constants (associated or generic) are irrelevant for this analysis, as their value is neither
+    /// affected by lifetimes, nor do they affect lifetimes.
+    pub fn is_fully_generic_for_reflection(self) -> bool {
+        #[derive(Default)]
+        struct ParamFinder {
+            seen: FxHashSet<u32>,
+        }
+
+        impl<'tcx> TypeVisitor<TyCtxt<'tcx>> for ParamFinder {
+            type Result = ControlFlow<()>;
+            fn visit_region(&mut self, r: Region<'tcx>) -> Self::Result {
+                match r.kind() {
+                    RegionKind::ReEarlyParam(param) => {
+                        if self.seen.insert(param.index) {
+                            ControlFlow::Continue(())
+                        } else {
+                            ControlFlow::Break(())
+                        }
+                    }
+                    RegionKind::ReBound(..) => ControlFlow::Continue(()),
+                    RegionKind::ReStatic | RegionKind::ReError(_) => ControlFlow::Break(()),
+                    RegionKind::ReVar(_)
+                    | RegionKind::RePlaceholder(_)
+                    | RegionKind::ReErased
+                    | RegionKind::ReLateParam(_) => bug!("unexpected lifetime in impl: {r:?}"),
+                }
+            }
+
+            fn visit_ty(&mut self, t: Ty<'tcx>) -> Self::Result {
+                match t.kind() {
+                    TyKind::Param(p) => {
+                        // Reject using a parameter twice (e.g. in `Foo<T, T>`)
+                        if !self.seen.insert(p.index) {
+                            return ControlFlow::Break(());
+                        }
+                    }
+                    TyKind::Alias(..) => return ControlFlow::Break(()),
+                    _ => (),
+                }
+                t.super_visit_with(self)
+            }
+        }
+        self.trait_ref
+            .instantiate_identity()
+            .skip_norm_wip()
+            .visit_with(&mut ParamFinder::default())
+            .is_continue()
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, TyEncodable, TyDecodable, StableHash, Debug)]
@@ -787,11 +846,11 @@ impl<'tcx> TermKind<'tcx> {
 
 /// Represents the bounds declared on a particular set of type
 /// parameters. Should eventually be generalized into a flag list of
-/// where-clauses. You can obtain an `InstantiatedPredicates` list from a
-/// `GenericPredicates` by using the `instantiate` method. Note that this method
-/// reflects an important semantic invariant of `InstantiatedPredicates`: while
-/// the `GenericPredicates` are expressed in terms of the bound type
-/// parameters of the impl/trait/whatever, an `InstantiatedPredicates` instance
+/// where-clauses. You can obtain an `InstantiatedClauses` list from a
+/// `GenericClauses` by using the `instantiate` method. Note that this method
+/// reflects an important semantic invariant of `InstantiatedClauses`: while
+/// the `GenericClauses` are expressed in terms of the bound type
+/// parameters of the impl/trait/whatever, an `InstantiatedClauses` instance
 /// represented a set of bounds for some particular instantiation,
 /// meaning that the generic parameters have been instantiated with
 /// their values.
@@ -800,23 +859,23 @@ impl<'tcx> TermKind<'tcx> {
 /// ```ignore (illustrative)
 /// struct Foo<T, U: Bar<T>> { ... }
 /// ```
-/// Here, the `GenericPredicates` for `Foo` would contain a list of bounds like
+/// Here, the `GenericClauses` for `Foo` would contain a list of bounds like
 /// `[[], [U:Bar<T>]]`. Now if there were some particular reference
-/// like `Foo<isize,usize>`, then the `InstantiatedPredicates` would be `[[],
+/// like `Foo<isize,usize>`, then the `InstantiatedClauses` would be `[[],
 /// [usize:Bar<isize>]]`.
 #[derive(Clone, Debug)]
-pub struct InstantiatedPredicates<'tcx> {
-    pub predicates: Vec<Unnormalized<'tcx, Clause<'tcx>>>,
+pub struct InstantiatedClauses<'tcx> {
+    pub clauses: Vec<Unnormalized<'tcx, Clause<'tcx>>>,
     pub spans: Vec<Span>,
 }
 
-impl<'tcx> InstantiatedPredicates<'tcx> {
-    pub fn empty() -> InstantiatedPredicates<'tcx> {
-        InstantiatedPredicates { predicates: vec![], spans: vec![] }
+impl<'tcx> InstantiatedClauses<'tcx> {
+    pub fn empty() -> InstantiatedClauses<'tcx> {
+        InstantiatedClauses { clauses: vec![], spans: vec![] }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.predicates.is_empty()
+        self.clauses.is_empty()
     }
 
     pub fn iter(&self) -> <&Self as IntoIterator>::IntoIter {
@@ -824,7 +883,7 @@ impl<'tcx> InstantiatedPredicates<'tcx> {
     }
 }
 
-impl<'tcx> IntoIterator for InstantiatedPredicates<'tcx> {
+impl<'tcx> IntoIterator for InstantiatedClauses<'tcx> {
     type Item = (Unnormalized<'tcx, Clause<'tcx>>, Span);
 
     type IntoIter = std::iter::Zip<
@@ -833,12 +892,12 @@ impl<'tcx> IntoIterator for InstantiatedPredicates<'tcx> {
     >;
 
     fn into_iter(self) -> Self::IntoIter {
-        debug_assert_eq!(self.predicates.len(), self.spans.len());
-        std::iter::zip(self.predicates, self.spans)
+        debug_assert_eq!(self.clauses.len(), self.spans.len());
+        std::iter::zip(self.clauses, self.spans)
     }
 }
 
-impl<'a, 'tcx> IntoIterator for &'a InstantiatedPredicates<'tcx> {
+impl<'a, 'tcx> IntoIterator for &'a InstantiatedClauses<'tcx> {
     type Item = (Unnormalized<'tcx, Clause<'tcx>>, Span);
 
     type IntoIter = std::iter::Zip<
@@ -847,8 +906,8 @@ impl<'a, 'tcx> IntoIterator for &'a InstantiatedPredicates<'tcx> {
     >;
 
     fn into_iter(self) -> Self::IntoIter {
-        debug_assert_eq!(self.predicates.len(), self.spans.len());
-        std::iter::zip(self.predicates.iter().copied(), self.spans.iter().copied())
+        debug_assert_eq!(self.clauses.len(), self.spans.len());
+        std::iter::zip(self.clauses.iter().copied(), self.spans.iter().copied())
     }
 }
 
@@ -1178,6 +1237,7 @@ impl<'tcx> TypingEnv<'tcx> {
         let TypingEnv { typing_mode, param_env } = self;
         match typing_mode.0.assert_not_erased() {
             TypingMode::Coherence
+            | TypingMode::Reflection
             | TypingMode::Typeck { .. }
             | TypingMode::PostTypeckUntilBorrowck { .. }
             | TypingMode::PostBorrowck { .. } => {}
@@ -1194,6 +1254,7 @@ impl<'tcx> TypingEnv<'tcx> {
         let TypingEnv { typing_mode, param_env } = self;
         match typing_mode.0.assert_not_erased() {
             TypingMode::Coherence
+            | TypingMode::Reflection
             | TypingMode::Typeck { .. }
             | TypingMode::PostTypeckUntilBorrowck { .. }
             | TypingMode::PostBorrowck { .. }

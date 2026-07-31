@@ -142,8 +142,6 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     /// version (resolve_vars_if_possible), this version will
     /// also select obligations if it seems useful, in an effort
     /// to get more type information.
-    // FIXME(-Znext-solver): A lot of the calls to this method should
-    // probably be `resolve_vars_with_obligations` or `structurally_resolve_type` instead.
     #[instrument(skip(self), level = "debug", ret)]
     pub(crate) fn resolve_vars_with_obligations<T: TypeFoldable<TyCtxt<'tcx>>>(
         &self,
@@ -569,9 +567,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             }
         }
 
-        let mut clauses = CollectClauses { clauses: vec![], fcx: self };
-        clauses.visit_ty_unambig(hir_ty);
-        self.tcx.mk_clauses(&clauses.clauses)
+        let mut collect_clauses = CollectClauses { clauses: vec![], fcx: self };
+        collect_clauses.visit_ty_unambig(hir_ty);
+        self.tcx.mk_clauses(&collect_clauses.clauses)
     }
 
     #[instrument(level = "debug", skip_all)]
@@ -696,6 +694,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 defining_opaque_types_and_generators
             }
             ty::TypingMode::Coherence
+            | ty::TypingMode::Reflection
             | ty::TypingMode::PostTypeckUntilBorrowck { .. }
             | ty::TypingMode::PostBorrowck { .. }
             | ty::TypingMode::PostAnalysis
@@ -1471,11 +1470,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     ) {
         let param_env = self.param_env;
 
-        let bounds = self.tcx.predicates_of(def_id).instantiate(self.tcx, args);
+        let bounds = self.tcx.clauses_of(def_id).instantiate(self.tcx, args);
 
         for obligation in traits::predicates_for_generics(
-            |idx, predicate_span| self.cause(span, code(idx, predicate_span)),
-            |pred| self.normalize(span, pred),
+            |idx, clause_span| self.cause(span, code(idx, clause_span)),
+            |clause| self.normalize(span, clause),
             param_env,
             bounds,
         ) {

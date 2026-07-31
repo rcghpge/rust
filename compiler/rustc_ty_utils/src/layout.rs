@@ -1,3 +1,5 @@
+use std::range::{RangeFrom, RangeToInclusive};
+
 use hir::def_id::DefId;
 use rustc_abi as abi;
 use rustc_abi::Integer::{I8, I32};
@@ -87,6 +89,7 @@ fn layout_of<'tcx>(
         | ty::TypingMode::Typeck { .. }
         | ty::TypingMode::PostTypeckUntilBorrowck { .. }
         | ty::TypingMode::PostBorrowck { .. }
+        | ty::TypingMode::Reflection
         | ty::TypingMode::ErasedNotCoherence(_)
         | ty::TypingMode::PostAnalysis => {}
     }
@@ -552,6 +555,7 @@ fn layout_of_uncached<'tcx>(
                 | ty::TypingMode::Typeck { .. }
                 | ty::TypingMode::PostTypeckUntilBorrowck { .. }
                 | ty::TypingMode::PostBorrowck { .. }
+                | ty::TypingMode::Reflection
                 | ty::TypingMode::ErasedNotCoherence(_)
                 | ty::TypingMode::PostAnalysis => {
                     return Err(error(cx, LayoutError::TooGeneric(ty)));
@@ -713,12 +717,13 @@ fn layout_of_uncached<'tcx>(
             // UnsafeCell and UnsafePinned both disable niche optimizations
             let is_special_no_niche = def.is_unsafe_cell() || def.is_unsafe_pinned();
 
-            let discr_range_of_repr =
-                |min, max| abi::Integer::discr_range_of_repr(tcx, ty, &def.repr(), min, max);
+            let discr_range_of_repr = |min: RangeFrom<i128>, max: RangeToInclusive<u128>| {
+                abi::Integer::discr_range_of_repr(tcx, ty, &def.repr(), min.start, max.last)
+            };
 
             let discriminants_iter = || {
                 def.is_enum()
-                    .then(|| def.discriminants(tcx).map(|(v, d)| (v, d.val as i128)))
+                    .then(|| def.discriminants(tcx).map(|(v, d)| (v, d.val)))
                     .into_flat_iter()
             };
 

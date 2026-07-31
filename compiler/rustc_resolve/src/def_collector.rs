@@ -180,7 +180,7 @@ impl<'a, 'ra, 'tcx> visit::Visitor<'a> for DefCollector<'a, 'ra, 'tcx> {
                 let mut parser = AttributeParser::new(
                     &self.r.tcx.sess,
                     self.r.features,
-                    self.r.tcx().registered_tools(()),
+                    self.r.tcx().registered_attr_tools(()),
                     ShouldEmit::Nothing,
                 );
                 let attrs = parser.parse_attribute_list(
@@ -565,7 +565,7 @@ impl<'a, 'ra, 'tcx> visit::Visitor<'a> for DefCollector<'a, 'ra, 'tcx> {
                         .push((normal.item.path.segments[0].ident, self.parent_scope));
                 }
             }
-            AttrKind::Synthetic(CfgTrace(_) | CfgAttrTrace) => {}
+            AttrKind::Synthetic(CfgTrace(_) | CfgAttrTrace(_)) => {}
             AttrKind::DocComment(..) => {}
         }
         visit::walk_attribute(self, attr);

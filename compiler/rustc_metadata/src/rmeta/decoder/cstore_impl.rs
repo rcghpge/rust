@@ -230,17 +230,18 @@ impl IntoArgs for (CrateNum, SimplifiedType) {
 provide! { tcx, def_id, other, cdata,
     explicit_item_bounds => { table_defaulted_array }
     explicit_item_self_bounds => { table_defaulted_array }
-    explicit_predicates_of => { table }
+    explicit_clauses_of => { table }
     generics_of => { table }
     inferred_outlives_of => { table_defaulted_array }
-    explicit_super_predicates_of => { table_defaulted_array }
-    explicit_implied_predicates_of => { table_defaulted_array }
+    explicit_super_clauses_of => { table_defaulted_array }
+    explicit_implied_clauses_of => { table_defaulted_array }
     type_of => { table }
     type_alias_is_checked => { table_direct }
     variances_of => { table }
     fn_sig => { table }
     codegen_fn_attrs => { table }
     impl_trait_header => { table }
+    impl_is_fully_generic_for_reflection => { table_direct }
     const_param_default => { table }
     object_lifetime_default => { table }
     thir_abstract_const => { table }
