@@ -8,7 +8,8 @@ use rustc_middle::middle::codegen_fn_attrs::{
 };
 use rustc_middle::ty::{self, Instance, TyCtxt};
 use rustc_session::config::{
-    BranchProtection, FunctionReturn, InstrumentMcount, OptLevel, PAuthKey, PacRet,
+    BranchProtection, FunctionReturn, InstrumentMcount, InstrumentMcountOpts, OptLevel, PAuthKey,
+    PacRet,
 };
 use rustc_span::sym;
 use rustc_symbol_mangling::mangle_internal_symbol;
@@ -201,7 +202,7 @@ pub(crate) fn frame_pointer(sess: &Session) -> FramePointer {
     let opts = &sess.opts;
     // "mcount" function relies on stack pointer.
     // See <https://sourceware.org/binutils/docs/gprof/Implementation.html>.
-    if opts.unstable_opts.instrument_mcount == InstrumentMcount::Mcount {
+    if let InstrumentMcount::Mcount(_) = opts.unstable_opts.instrument_mcount {
         fp.ratchet(FramePointer::Always);
     }
     fp.ratchet(opts.cg.force_frame_pointers);
@@ -248,8 +249,9 @@ fn instrument_function_attr<'ll>(
         };
 
         if instrument_entry {
+            let mut opts = InstrumentMcountOpts::default();
             match sess.opts.unstable_opts.instrument_mcount {
-                InstrumentMcount::Mcount => {
+                InstrumentMcount::Mcount(mopts) => {
                     // The function name varies on platforms.
                     // See test/CodeGen/mcount.c in clang.
                     let mcount_name = match &sess.target.llvm_mcount_intrinsic {
@@ -262,11 +264,19 @@ fn instrument_function_attr<'ll>(
                         "instrument-function-entry-inlined",
                         mcount_name,
                     ));
+                    opts = mopts;
                 }
-                InstrumentMcount::Fentry => {
+                InstrumentMcount::Fentry(fopts) => {
                     attrs.push(llvm::CreateAttrStringValue(cx.llcx, "fentry-call", "true"));
+                    opts = fopts;
                 }
                 InstrumentMcount::Disabled => {}
+            }
+            if opts.no_call {
+                attrs.push(llvm::CreateAttrString(cx.llcx, "mnop-mcount"));
+            }
+            if opts.record {
+                attrs.push(llvm::CreateAttrString(cx.llcx, "mrecord-mcount"));
             }
         }
     }
@@ -530,9 +540,7 @@ pub(crate) fn llfn_attrs_from_instance<'ll, 'tcx>(
         to_add.extend(sanitize_attrs(cx, tcx, codegen_fn_attrs.sanitizers));
 
         // For non-naked functions, set branch protection attributes on aarch64.
-        if let Some(BranchProtection { bti, pac_ret, gcs }) =
-            sess.opts.unstable_opts.branch_protection
-        {
+        if let Some(BranchProtection { bti, pac_ret, gcs }) = sess.branch_protection() {
             assert!(sess.target.arch == Arch::AArch64);
             if bti {
                 to_add.push(llvm::CreateAttrString(cx.llcx, "branch-target-enforcement"));

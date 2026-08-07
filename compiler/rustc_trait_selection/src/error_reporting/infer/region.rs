@@ -13,7 +13,7 @@ use rustc_middle::traits::ObligationCauseCode;
 use rustc_middle::ty::error::TypeError;
 use rustc_middle::ty::print::RegionHighlightMode;
 use rustc_middle::ty::{
-    self, IsSuggestable, Region, RegionUtilitiesExt, Ty, TyCtxt, TypeVisitableExt as _, Upcast as _,
+    self, IsSuggestable, Region, RegionExt, Ty, TyCtxt, TypeVisitableExt as _, Upcast as _,
 };
 use rustc_span::{BytePos, ErrorGuaranteed, Span, Symbol, kw, sym};
 use tracing::{debug, instrument};
@@ -452,7 +452,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                     for (clause, span) in
                         self.tcx.clauses_of(def_id).instantiate_identity(self.tcx).into_iter()
                     {
-                        if let ty::ClauseKind::TypeOutlives(ty::OutlivesPredicate(a, b)) =
+                        if let ty::ClauseKind::TypeOutlives(ty::OutlivesClause(a, b)) =
                             clause.kind().skip_binder()
                             && let ty::Param(param) = a.kind()
                             && param.name == kw::SelfUpper

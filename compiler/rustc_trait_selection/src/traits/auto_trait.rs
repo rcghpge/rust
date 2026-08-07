@@ -8,7 +8,7 @@ use rustc_data_structures::fx::{FxIndexMap, FxIndexSet, IndexEntry};
 use rustc_data_structures::unord::UnordSet;
 use rustc_hir::def_id::CRATE_DEF_ID;
 use rustc_infer::infer::DefineOpaqueTypes;
-use rustc_middle::ty::{Region, RegionUtilitiesExt, RegionVid};
+use rustc_middle::ty::{Region, RegionVid};
 use rustc_span::DUMMY_SP;
 use tracing::debug;
 
@@ -844,7 +844,7 @@ impl<'tcx> AutoTraitFinder<'tcx> {
                                 &dummy_cause,
                             );
                         }
-                        (Some(ty::OutlivesPredicate(t_a, r_b)), _) => {
+                        (Some(ty::OutlivesClause(t_a, r_b)), _) => {
                             selcx.infcx.register_type_outlives_constraint(t_a, r_b, &dummy_cause);
                         }
                         _ => {}

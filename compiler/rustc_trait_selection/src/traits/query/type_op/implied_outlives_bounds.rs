@@ -97,6 +97,7 @@ pub fn compute_implied_outlives_bounds_inner<'tcx>(
             continue;
         }
 
+        let arg = ocx.infcx.resolve_vars_if_possible(arg);
         // From the full set of obligations, just filter down to the region relationships.
         for obligation in
             wf::unnormalized_obligations(ocx.infcx, param_env, arg, DUMMY_SP, CRATE_DEF_ID)
@@ -134,11 +135,12 @@ pub fn compute_implied_outlives_bounds_inner<'tcx>(
                 }
 
                 // We need to register region relationships
-                ty::PredicateKind::Clause(ty::ClauseKind::RegionOutlives(
-                    ty::OutlivesPredicate(r_a, r_b),
-                )) => outlives_bounds.push(OutlivesBound::RegionSubRegion(r_b, r_a)),
+                ty::PredicateKind::Clause(ty::ClauseKind::RegionOutlives(ty::OutlivesClause(
+                    r_a,
+                    r_b,
+                ))) => outlives_bounds.push(OutlivesBound::RegionSubRegion(r_b, r_a)),
 
-                ty::PredicateKind::Clause(ty::ClauseKind::TypeOutlives(ty::OutlivesPredicate(
+                ty::PredicateKind::Clause(ty::ClauseKind::TypeOutlives(ty::OutlivesClause(
                     ty_a,
                     r_b,
                 ))) => {

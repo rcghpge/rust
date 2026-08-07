@@ -88,7 +88,7 @@ impl CommandLineStep for Std {
             Mode::Std,
             SourceType::InTree,
             target,
-            builder.config.cmd.kind(),
+            builder.kind,
         );
 
         std_cargo(builder, target, &mut cargo, &self.crates);
@@ -98,7 +98,7 @@ impl CommandLineStep for Std {
         }
 
         let _guard = builder.msg(
-            builder.config.cmd.kind(),
+            builder.kind,
             format_args!("library artifacts{}", crate_description(&self.crates)),
             Mode::Std,
             build_compiler,
@@ -699,7 +699,7 @@ macro_rules! tool_check_step {
             const IS_HOST: bool = true;
 
             fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
-                run.selectors(&[$path $(, $alt_path )*])
+                run.multi_path(&[$path $(, $alt_path )*])
             }
 
             fn is_default_step(_builder: &Builder<'_>) -> bool {

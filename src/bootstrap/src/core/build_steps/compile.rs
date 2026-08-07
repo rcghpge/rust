@@ -28,7 +28,7 @@ use crate::core::builder::{
 };
 use crate::core::config::toml::target::DefaultLinuxLinkerOverride;
 use crate::core::config::{
-    CompilerBuiltins, DebuginfoLevel, LlvmLibunwind, OverrideAllocator, RustcLto, TargetSelection,
+    Allocator, CompilerBuiltins, DebuginfoLevel, LlvmLibunwind, RustcLto, TargetSelection,
 };
 use crate::utils::build_stamp;
 use crate::utils::build_stamp::BuildStamp;
@@ -1369,6 +1369,12 @@ pub fn rustc_cargo_env(builder: &Builder<'_>, cargo: &mut Cargo, target: TargetS
         cargo.env("RUSTC_VERIFY_LLVM_IR", "1");
     }
 
+    let nightly = builder.config.channel == "nightly" || builder.config.channel == "dev";
+    if nightly {
+        // We want to enable Polonius Alpha by default on nighty
+        cargo.env("CFG_DEFAULT_POLONIUS_NEXT", "1");
+    }
+
     // These conditionals represent a tension between three forces:
     // - For non-check builds, we need to define some LLVM-related environment
     //   variables, requiring LLVM to have been built.
@@ -1392,7 +1398,7 @@ pub fn rustc_cargo_env(builder: &Builder<'_>, cargo: &mut Cargo, target: TargetS
     }
 
     // See also the "JEMALLOC_SYS_WITH_LG_PAGE" setting in the tool build step.
-    if let Some(OverrideAllocator::Jemalloc) = builder.config.override_allocator(target)
+    if builder.config.allocator(target) == Allocator::Jemalloc
         && env::var_os("JEMALLOC_SYS_WITH_LG_PAGE").is_none()
     {
         // Build jemalloc on AArch64 with support for page sizes up to 64K
@@ -1486,6 +1492,9 @@ fn rustc_llvm_env(builder: &Builder<'_>, cargo: &mut Cargo, target: TargetSelect
     }
     if builder.config.llvm_assertions {
         cargo.env("LLVM_ASSERTIONS", "1");
+    }
+    if builder.cxx_tool(target).is_like_gnu() || builder.cc_tool(target).is_like_gnu() {
+        cargo.env("LLVM_COMPILER_IS_GNU_LIKE", "1");
     }
 }
 
@@ -1806,10 +1815,7 @@ fn write_codegen_backend_stamp(
         return stamp;
     }
 
-    let mut files = files.into_iter().filter(|f| {
-        let filename = f.file_name().unwrap().to_str().unwrap();
-        is_dylib(f) && filename.contains("rustc_codegen_")
-    });
+    let mut files = files.into_iter().filter(|f| looks_like_codegen_backend(Path::new(f)));
     let codegen_backend = match files.next() {
         Some(f) => f,
         None => panic!("no dylibs built for codegen backend?"),
@@ -1822,6 +1828,11 @@ fn write_codegen_backend_stamp(
     stamp = stamp.add_stamp(codegen_backend);
     t!(stamp.write());
     stamp
+}
+
+pub fn looks_like_codegen_backend(path: &Path) -> bool {
+    is_dylib(path)
+        && path.file_name().and_then(|p| p.to_str()).is_some_and(|n| n.contains("rustc_codegen_"))
 }
 
 /// Creates the `codegen-backends` folder for a compiler that's about to be
@@ -2339,17 +2350,13 @@ impl CommandLineStep for Assemble {
             let is_dylib_or_debug = is_dylib(&f.path()) || is_debug_info(&filename);
 
             // If we link statically to stdlib, do not copy the libstd dynamic library file
-            // FIXME: Also do this for Windows once incremental post-optimization stage0 tests
-            // work without std.dll (see https://github.com/rust-lang/rust/pull/131188).
-            let can_be_rustc_dynamic_dep = if builder
-                .link_std_into_rustc_driver(target_compiler.host)
-                && !target_compiler.host.is_windows()
-            {
-                let is_std = filename.starts_with("std-") || filename.starts_with("libstd-");
-                !is_std
-            } else {
-                true
-            };
+            let can_be_rustc_dynamic_dep =
+                if builder.link_std_into_rustc_driver(target_compiler.host) {
+                    let is_std = filename.starts_with("std-") || filename.starts_with("libstd-");
+                    !is_std
+                } else {
+                    true
+                };
 
             if is_dylib_or_debug && can_be_rustc_dynamic_dep && !is_proc_macro {
                 builder.copy_link(&f.path(), &rustc_libdir.join(&filename), FileType::Regular);

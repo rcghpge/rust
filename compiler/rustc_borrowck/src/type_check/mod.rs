@@ -26,9 +26,8 @@ use rustc_middle::traits::query::NoSolution;
 use rustc_middle::ty::adjustment::PointerCoercion;
 use rustc_middle::ty::cast::CastTy;
 use rustc_middle::ty::{
-    self, CanonicalUserTypeAnnotation, CanonicalUserTypeAnnotations, GenericArgsRef,
-    RegionUtilitiesExt, Ty, TyCtxt, TypeVisitableExt, UserArgs, UserTypeAnnotationIndex,
-    fold_regions,
+    self, CanonicalUserTypeAnnotation, CanonicalUserTypeAnnotations, GenericArgsRef, Ty, TyCtxt,
+    TypeVisitableExt, UserArgs, UserTypeAnnotationIndex, fold_regions,
 };
 use rustc_mir_dataflow::move_paths::MoveData;
 use rustc_mir_dataflow::points::DenseLocationMap;
@@ -240,7 +239,7 @@ struct TypeChecker<'a, 'tcx> {
     /// all of the promoted items.
     user_type_annotations: &'a CanonicalUserTypeAnnotations<'tcx>,
     region_bound_pairs: &'a RegionBoundPairs<'tcx>,
-    known_type_outlives_obligations: &'a [ty::PolyTypeOutlivesPredicate<'tcx>],
+    known_type_outlives_obligations: &'a [ty::PolyTypeOutlivesClause<'tcx>],
     reported_errors: FxIndexSet<(Ty<'tcx>, Span)>,
     universal_regions: &'a UniversalRegions<'tcx>,
     location_table: &'a PoloniusLocationTable,
@@ -258,7 +257,7 @@ pub(crate) struct MirTypeckResults<'tcx> {
     pub(crate) constraints: MirTypeckRegionConstraints<'tcx>,
     pub(crate) universal_region_relations: Frozen<UniversalRegionRelations<'tcx>>,
     pub(crate) region_bound_pairs: Frozen<RegionBoundPairs<'tcx>>,
-    pub(crate) known_type_outlives_obligations: Frozen<Vec<ty::PolyTypeOutlivesPredicate<'tcx>>>,
+    pub(crate) known_type_outlives_obligations: Frozen<Vec<ty::PolyTypeOutlivesClause<'tcx>>>,
     pub(crate) deferred_closure_requirements: DeferredClosureRequirements<'tcx>,
     pub(crate) polonius_context: Option<PoloniusContext>,
 }
@@ -480,10 +479,8 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
             let projected_ty = curr_projected_ty.projection_ty_core(
                 tcx,
                 proj,
-                |ty| self.normalize(ty::Unnormalized::new_wip(ty), locations),
-                |ty, variant_index, field, ()| {
-                    PlaceTy::field_ty(tcx, ty, variant_index, field).skip_norm_wip()
-                },
+                |ty| self.normalize(ty, locations),
+                |()| None,
                 |_| unreachable!(),
             );
             curr_projected_ty = projected_ty;
@@ -1605,8 +1602,8 @@ impl<'a, 'tcx> Visitor<'tcx> for TypeChecker<'a, 'tcx> {
                             ),
                         }
                     }
-                    CastKind::Subtype => {
-                        bug!("CastKind::Subtype shouldn't exist in borrowck")
+                    CastKind::Subtype | CastKind::BoxDerefTransmute => {
+                        bug!("CastKind::{cast_kind:?} shouldn't exist in borrowck")
                     }
                 }
             }

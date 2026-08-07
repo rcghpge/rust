@@ -18,6 +18,7 @@ use rustc_index::IndexVec;
 use rustc_infer::infer::{BoundRegionConversionTime, DefineOpaqueTypes, InferOk, TypeTrace};
 use rustc_middle::ty::adjustment::AllowTwoPhase;
 use rustc_middle::ty::error::TypeError;
+use rustc_middle::ty::print::with_forced_trimmed_paths;
 use rustc_middle::ty::{self, IsSuggestable, Ty, TyCtxt, TypeVisitableExt, Unnormalized};
 use rustc_middle::{bug, span_bug};
 use rustc_session::Session;
@@ -238,10 +239,10 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // any remaining type variables are assigned to new, unrelated variables. This
         // is because the inference guidance here is only speculative.
         // FIXME(splat): do we need to splat arguments before this type inference?
-        let formal_output = self.resolve_vars_with_obligations(formal_output);
         let mut expected_input_tys: Option<Vec<_>> = expectation
             .only_has_type(self)
             .and_then(|expected_output| {
+                let formal_output = self.resolve_vars_with_obligations(formal_output);
                 // FIXME(#149379): This operation results in expected input
                 // types which are potentially not well-formed or for whom the
                 // function where-bounds don't actually hold. This results
@@ -750,7 +751,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         spans,
                         // FIXME(splat): add a new error code before stabilization
                         E0277,
-                        "cannot use splat attribute; the splatted argument type \
+                        "cannot use `rustc_splat` attribute; the splatted argument type \
                         must be a tuple or unit, not a {:?} ({:?})",
                         tuple_type.kind(),
                         self.structurally_resolve_type(
@@ -3489,7 +3490,7 @@ impl<'a, 'tcx> CallCtxt<'a, 'tcx> {
         if ty.is_unit() {
             "()".to_string()
         } else if ty.is_suggestable(self.tcx, false) {
-            format!("/* {ty} */")
+            with_forced_trimmed_paths!(format!("/* {ty} */"))
         } else if let Some(fn_def_id) = self.fn_def_id
             && self.tcx.def_kind(fn_def_id).is_fn_like()
             && let self_implicit =

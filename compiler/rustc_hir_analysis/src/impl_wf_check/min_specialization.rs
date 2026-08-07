@@ -55,7 +55,7 @@
 //! `specialization` or `min_specialization` is enabled to implement these
 //! traits.
 //!
-//! ### rustc_unsafe_specialization_marker
+//! ### rustc_allow_lifetime_dependent_specialization
 //!
 //! There are also some specialization on traits with no methods, including the
 //! stable `FusedIterator` trait. We allow marking marker traits with an
@@ -72,8 +72,7 @@ use rustc_infer::traits::ObligationCause;
 use rustc_infer::traits::specialization_graph::Node;
 use rustc_middle::ty::trait_def::TraitSpecializationKind;
 use rustc_middle::ty::{
-    self, GenericArg, GenericArgs, GenericArgsRef, RegionUtilitiesExt, TyCtxt, TypeVisitableExt,
-    TypingMode,
+    self, GenericArg, GenericArgs, GenericArgsRef, TyCtxt, TypeVisitableExt, TypingMode,
 };
 use rustc_span::{ErrorGuaranteed, Span};
 use rustc_trait_selection::error_reporting::InferCtxtErrorExt;

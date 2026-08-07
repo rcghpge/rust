@@ -43,8 +43,6 @@
 //!
 //! For more details, see the [rustc-dev-guide](https://rustc-dev-guide.rust-lang.org/query.html).
 
-#![allow(unused_parens)]
-
 use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -807,14 +805,14 @@ rustc_queries! {
         feedable
     }
 
-    /// Returns the *inferred outlives-predicates* of the item given by `DefId`.
+    /// Returns the *inferred outlives-clauses* of the item given by `DefId`.
     ///
     /// E.g., for `struct Foo<'a, T> { x: &'a T }`, this would return `[T: 'a]`.
     ///
     /// **Tip**: You can use `#[rustc_dump_inferred_outlives]` on an item to basically
     /// print the result of this query for use in UI tests or for debugging purposes.
     query inferred_outlives_of(key: DefId) -> &'tcx [(ty::Clause<'tcx>, Span)] {
-        desc { "computing inferred outlives-predicates of `{}`", tcx.def_path_str(key) }
+        desc { "computing inferred outlives-clauses of `{}`", tcx.def_path_str(key) }
         cache_on_disk
         separate_provide_extern
         feedable
@@ -1028,16 +1026,16 @@ rustc_queries! {
         separate_provide_extern
     }
 
-    /// Gets a map with the inferred outlives-predicates of every item in the local crate.
+    /// Gets a map with the inferred outlives-clauses of every item in the local crate.
     ///
     /// <div class="warning">
     ///
     /// **Do not call this query** directly, use [`Self::inferred_outlives_of`] instead.
     ///
     /// </div>
-    query inferred_outlives_crate(_: ()) -> &'tcx ty::CratePredicatesMap<'tcx> {
+    query inferred_outlives_crate(_: ()) -> &'tcx ty::CrateClausesMap<'tcx> {
         arena_cache
-        desc { "computing the inferred outlives-predicates for items in this crate" }
+        desc { "computing the inferred outlives-clauses for items in this crate" }
     }
 
     /// Maps from an impl/trait or struct/variant `DefId`
@@ -1137,7 +1135,7 @@ rustc_queries! {
         desc { "check transmute calls inside `{}`", tcx.def_path_str(key) }
     }
 
-    /// Unsafety-check this `LocalDefId`.
+    /// Type-check offloads calls given a typeck root
     query check_offloads(key: LocalDefId) -> Result<(), ErrorGuaranteed> {
         desc { "check offload calls inside `{}`", tcx.def_path_str(key) }
     }

@@ -629,6 +629,16 @@ fn set_get_permissions_nofollows() {
             assert_eq!(result.unwrap(), ());
             let metadata0 = check!(fs::metadata(&filename));
             assert!(metadata0.permissions().readonly());
+
+            // Reset the read-only bit under Windows 7: avoids the
+            // `TempDir::drop` from crashing on a permission denial when
+            // trying to delete the file that has it.
+            #[cfg(all(windows, target_vendor = "win7"))]
+            {
+                let mut permission_bits = metadata0.permissions();
+                permission_bits.set_readonly(false);
+                check!(fs::set_permissions_nofollow(&filename, permission_bits));
+            }
         },
         _ => {
             let error_kind = result.unwrap_err().kind();
@@ -669,6 +679,16 @@ fn set_get_permissions_nofollows_symlink() {
             assert!(metadata0.permissions().readonly());
             #[cfg(not(windows))]
             assert!(!metadata0.permissions().readonly());
+
+            // Reset the read-only bit under Windows 7: avoids the
+            // `TempDir::drop` from crashing on a permission denial when
+            // trying to delete the file that has it.
+            #[cfg(all(windows, target_vendor = "win7"))]
+            {
+                let mut permission_bits = metadata0.permissions();
+                permission_bits.set_readonly(false);
+                check!(fs::set_permissions_nofollow(&symlink_name, permission_bits));
+            }
         },
         _ => {
             let error_kind = result.unwrap_err().kind();
@@ -1808,6 +1828,25 @@ fn create_dir_all_with_junctions() {
     check!(fs::create_dir_all(&d));
     assert!(link.is_dir());
     assert!(d.exists());
+}
+
+#[test]
+#[cfg(windows)]
+fn junction_point_overlong_path() {
+    // Regression test: an `original` path long enough to exceed the inline
+    // reparse buffer used to be copied past the end of the stack array. It must
+    // now be rejected with a clean error instead of overflowing.
+    let tmpdir = tmpdir();
+    let link = tmpdir.join("junction");
+
+    // The `\\?\` prefix bypasses MAX_PATH normalization so the path is copied
+    // through verbatim. 20_000 code units lands in the old overflow window: it
+    // passed the previous `> u16::MAX` byte check yet exceeded the buffer.
+    let mut original = String::from(r"\\?\C:\");
+    original.push_str(&"a".repeat(20_000));
+
+    let err = junction_point(Path::new(&original), &link).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidInput);
 }
 
 #[test]

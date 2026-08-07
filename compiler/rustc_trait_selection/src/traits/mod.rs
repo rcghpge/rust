@@ -15,12 +15,10 @@ pub mod outlives_bounds;
 pub mod outlives_for_liveness;
 pub mod project;
 pub mod query;
-#[allow(hidden_glob_reexports)]
-mod select;
+pub mod select;
 pub mod specialize;
 mod structural_normalize;
-#[allow(hidden_glob_reexports)]
-mod util;
+pub mod util;
 pub mod vtable;
 pub mod wf;
 
@@ -50,7 +48,7 @@ pub use self::dyn_compatibility::{
     DynCompatibilityViolation, dyn_compatibility_violations_for_assoc_item,
     hir_ty_lowering_dyn_compatibility_violations, is_vtable_safe_method,
 };
-pub use self::engine::{ObligationCtxt, TraitEngineExt};
+pub use self::engine::{FulfillmentEngine, ObligationCtxt};
 pub use self::fulfill::{FulfillmentContext, OldSolverError, PendingPredicateObligation};
 pub use self::normalize::NormalizeExt;
 pub use self::project::{normalize_inherent_projection, normalize_projection_term};
@@ -336,16 +334,16 @@ fn do_normalize_clauses<'tcx>(
     //
     // FIXME: It's very weird that we ignore region obligations but apparently
     // still need to use `resolve_regions` as we need the resolved regions in
-    // the normalized predicates.
+    // the normalized clauses.
     //
     // FIXME(-Zhigher-ranked-assumptions): We're ignoring region errors for now.
     // There're placeholder constraints `leaking` out. This is a hack to work around
     // the fact that we don't support placeholder assumptions right now and is necessary
-    // for `compare_method_predicate_entailment`. We should remove this once we
-    // have proper support for implied bounds on binders.
+    // for `compare_method_clause_entailment`. We should remove this once we have proper
+    // support for implied bounds on binders.
     //
     // This is required by trait-system-refactor-initiative#166. The new solver encounters
-    // this more frequently as we entirely ignore outlives predicates with the old solver.
+    // this more frequently as we entirely ignore outlives clauses with the old solver.
     let _errors = infcx.resolve_regions(cause.body_def_id, elaborated_env, []);
     match infcx.fully_resolve(clauses) {
         Ok(clauses) => Ok(clauses),
@@ -482,7 +480,7 @@ pub fn normalize_param_env_or_error<'tcx>(
     // then we normalize the `TypeOutlives` bounds inside the normalized parameter environment.
     //
     // This works fairly well because trait matching does not actually care about param-env
-    // TypeOutlives predicates - these are normally used by regionck.
+    // TypeOutlives clauses - these are normally used by regionck.
     let outlives_clauses: Vec<_> = clauses
         .extract_if(.., |clause| {
             matches!(clause.kind().skip_binder(), ty::ClauseKind::TypeOutlives(..))
@@ -490,7 +488,7 @@ pub fn normalize_param_env_or_error<'tcx>(
         .collect();
 
     debug!(
-        "normalize_param_env_or_error: predicates=(non-outlives={:?}, outlives={:?})",
+        "normalize_param_env_or_error: clauses=(non-outlives={:?}, outlives={:?})",
         clauses, outlives_clauses
     );
     let Ok(non_outlives_clauses) =
@@ -503,9 +501,9 @@ pub fn normalize_param_env_or_error<'tcx>(
 
     debug!("normalize_param_env_or_error: non-outlives clauses={:?}", non_outlives_clauses);
 
-    // Not sure whether it is better to include the unnormalized TypeOutlives predicates
+    // Not sure whether it is better to include the unnormalized TypeOutlives clauses
     // here. I believe they should not matter, because we are ignoring TypeOutlives param-env
-    // predicates here anyway. Keeping them here anyway because it seems safer.
+    // clauses here anyway. Keeping them here anyway because it seems safer.
     let outlives_env = non_outlives_clauses.iter().chain(&outlives_clauses).cloned();
     let outlives_env = ty::ParamEnv::new(tcx.mk_clauses_from_iter(outlives_env));
     let Ok(outlives_clauses) = do_normalize_clauses(tcx, cause, outlives_env, outlives_clauses)
@@ -780,7 +778,7 @@ fn replace_param_and_infer_args_with_placeholder<'tcx>(
 }
 
 /// Normalizes the clauses and checks whether they hold in an empty environment. If this
-/// returns true, then either normalize encountered an error or one of the predicates did not
+/// returns true, then either normalize encountered an error or one of the clauses did not
 /// hold. Used when creating vtables to check for unsatisfiable methods. This should not be
 /// used during analysis.
 pub fn impossible_clauses<'tcx>(tcx: TyCtxt<'tcx>, clauses: Vec<ty::Clause<'tcx>>) -> bool {

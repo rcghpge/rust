@@ -50,7 +50,7 @@ use crate::diagnostics::{
 use crate::op::contains_let_in_chain;
 use crate::{
     BreakableCtxt, CoroutineTypes, Diverges, FnCtxt, GatherLocalsVisitor, Needs,
-    TupleArgumentsFlag, cast, fatally_break_rust, report_unexpected_variant_res, type_error_struct,
+    TupleArgumentsFlag, cast, fatally_break_rust, type_error_struct,
 };
 
 impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
@@ -589,8 +589,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 Ty::new_error(tcx, e)
             }
             Res::Def(DefKind::Variant, _) => {
-                let e = report_unexpected_variant_res(
-                    tcx,
+                let e = self.report_unexpected_variant_res(
                     res,
                     Some(expr),
                     &[],
@@ -631,7 +630,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 // be known if explicitly specified via turbofish).
                 self.deferred_transmute_checks.borrow_mut().push((*from, to, expr.hir_id));
             }
-            if tcx.is_intrinsic(did, sym::offload) {
+            if !tcx.sess.opts.unstable_opts.offload.is_empty()
+                && tcx.is_intrinsic(did, sym::offload)
+            {
                 let args = args.skip_binder();
                 let f = args.type_at(0);
                 let t = args.type_at(1);

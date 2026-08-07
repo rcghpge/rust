@@ -1076,7 +1076,7 @@ pub enum AttributeKind {
     EiiDeclaration(EiiDecl),
 
     /// Implementation detail of `#[eii]`
-    EiiImpls(ThinVec<EiiImpl>),
+    EiiImpl(Box<EiiImpl>),
 
     /// Represents [`#[export_name]`](https://doc.rust-lang.org/reference/abi.html#the-export_name-attribute).
     ExportName {
@@ -1349,6 +1349,9 @@ pub enum AttributeKind {
 
     /// Represents `#[rustc_allow_incoherent_impl]`.
     RustcAllowIncoherentImpl(Span),
+
+    /// Represents `#[rustc_allow_lifetime_dependent_specialization]`.
+    RustcAllowLifetimeDependentSpecialization,
 
     /// Represents `#[rustc_as_ptr]` (used by the `dangling_pointers_from_temporaries` lint).
     RustcAsPtr,
@@ -1654,9 +1657,6 @@ pub enum AttributeKind {
     /// Represents `#[rustc_trivial_field_reads]`
     RustcTrivialFieldReads,
 
-    /// Represents `#[rustc_unsafe_specialization_marker]`.
-    RustcUnsafeSpecializationMarker,
-
     /// Represents `#[sanitize]`
     ///
     /// the on set and off set are distjoint since there's a third option: unset.
@@ -1706,7 +1706,8 @@ pub enum AttributeKind {
         limit: Limit,
     },
 
-    /// Represents `#[unroll]`
+    /// Represents `#[rustc_unroll]`
+    // FIXME(#159429): temporarily renamed from `#[unroll]` to mitigate nameres ambiguity
     Unroll(UnrollAttr),
 
     /// Represents `#[unstable_feature_bound]`.

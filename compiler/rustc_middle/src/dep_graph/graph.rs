@@ -676,7 +676,7 @@ impl DepGraphData {
             let ok = match color {
                 DepNodeColor::Unknown => true,
                 DepNodeColor::Red => false,
-                DepNodeColor::Green(..) => sess.threads().is_some(), // Other threads may mark this green
+                DepNodeColor::Green(..) => sess.opts.jobs.frontend.is_some(), // Other threads may mark this green
             };
             if !ok {
                 panic!("{}", msg())
@@ -703,6 +703,15 @@ impl DepGraphData {
     #[inline]
     pub fn prev_value_fingerprint_of(&self, prev_index: SerializedDepNodeIndex) -> Fingerprint {
         self.previous.value_fingerprint_for_index(prev_index)
+    }
+
+    /// The number of incremental sessions in this graph's lineage, from
+    /// [`SerializedDepGraph::session_count`]. Advances by one per successful
+    /// session; a failed session does not commit a graph, so a re-run sees
+    /// the same count.
+    #[inline]
+    pub fn session_count(&self) -> u64 {
+        self.previous.session_count()
     }
 
     #[inline]
