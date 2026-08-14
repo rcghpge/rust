@@ -281,6 +281,10 @@ struct Args {
     /// Ignore `//@ ignore-backends` directives.
     #[arg(long)]
     bypass_ignore_backends: bool,
+    /// Build proc-macros for wasm. Assumes environment is configured to support this; e.g., std is
+    /// already built appropriately.
+    #[arg(long)]
+    wasm_proc_macros: bool,
 
     // These values can be entered multiple times, for example:
     // --skip foo --skip bar
@@ -384,6 +388,13 @@ pub(crate) fn parse_config(args: Vec<String>) -> Config {
         args.parallel_frontend_threads.unwrap_or(Config::DEFAULT_PARALLEL_FRONTEND_THREADS);
     let iteration_count = args.iteration_count.unwrap_or(Config::DEFAULT_ITERATION_COUNT);
     assert!(iteration_count > 0, "`--iteration-count` must be a positive integer");
+
+    let gcc_supported_target_tuples = match default_codegen_backend {
+        CodegenBackend::Gcc => {
+            directives::find_gcc_supported_targets(&args.sysroot_base, &args.host)
+        }
+        CodegenBackend::Llvm | CodegenBackend::Cranelift => vec![],
+    };
 
     Config {
         bless: args.bless,
@@ -493,6 +504,10 @@ pub(crate) fn parse_config(args: Vec<String>) -> Config {
         default_codegen_backend,
         override_codegen_backend: args.override_codegen_backend,
         bypass_ignore_backends: args.bypass_ignore_backends,
+
+        gcc_supported_target_tuples,
+
+        wasm_proc_macros: args.wasm_proc_macros,
 
         jobs: args.jobs,
 

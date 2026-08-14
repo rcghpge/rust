@@ -754,6 +754,9 @@ pub(crate) struct Config {
     /// Whether to ignore `//@ ignore-backends`.
     pub(crate) bypass_ignore_backends: bool,
 
+    /// Target tuples for which we've found libgccjit.so.
+    pub(crate) gcc_supported_target_tuples: Vec<String>,
+
     /// Number of parallel jobs configured for the build.
     ///
     /// This is forwarded from bootstrap's `jobs` configuration.
@@ -763,6 +766,8 @@ pub(crate) struct Config {
     pub(crate) parallel_frontend_threads: u32,
     /// Number of times to execute each test.
     pub(crate) iteration_count: u32,
+
+    pub(crate) wasm_proc_macros: bool,
 }
 
 impl Config {

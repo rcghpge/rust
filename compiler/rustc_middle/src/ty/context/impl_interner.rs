@@ -6,9 +6,10 @@ use rustc_data_structures::Limit;
 use rustc_data_structures::intern::Interned;
 use rustc_errors::ErrorGuaranteed;
 use rustc_hir as hir;
+use rustc_hir::CRATE_HIR_ID;
+use rustc_hir::attrs::lang_items::LangItem;
 use rustc_hir::def::{CtorKind, DefKind, Namespace};
 use rustc_hir::def_id::{DefId, LOCAL_CRATE, LocalDefId};
-use rustc_hir::{CRATE_HIR_ID, LangItem};
 use rustc_span::{DUMMY_SP, Span, Symbol};
 use rustc_type_ir::lang_items::{SolverAdtLangItem, SolverProjectionLangItem, SolverTraitLangItem};
 use rustc_type_ir::{
@@ -146,15 +147,11 @@ impl<'tcx> Interner for TyCtxt<'tcx> {
         f(&mut *self.new_solver_evaluation_cache.lock())
     }
 
-    fn canonical_param_env_cache_get_or_insert<R>(
+    fn with_canonical_param_env_cache<R>(
         self,
-        param_env: ty::ParamEnv<'tcx>,
-        f: impl FnOnce() -> ty::CanonicalParamEnvCacheEntry<Self>,
-        from_entry: impl FnOnce(&ty::CanonicalParamEnvCacheEntry<Self>) -> R,
+        f: impl FnOnce(&mut ty::CanonicalParamEnvCache<Self>) -> R,
     ) -> R {
-        let mut cache = self.new_solver_canonical_param_env_cache.lock();
-        let entry = cache.entry(param_env).or_insert_with(f);
-        from_entry(entry)
+        f(&mut *self.new_solver_canonical_param_env_cache.lock())
     }
 
     fn assert_evaluation_is_concurrent(&self) {
