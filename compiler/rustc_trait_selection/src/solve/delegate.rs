@@ -1,4 +1,6 @@
 use std::collections::hash_map::Entry;
+use std::fmt::Debug;
+use std::mem;
 use std::ops::Deref;
 
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
@@ -16,8 +18,8 @@ use rustc_infer::traits::solve::{
 use rustc_middle::traits::query::NoSolution;
 use rustc_middle::traits::solve::{Certainty, MaybeInfo};
 use rustc_middle::ty::{
-    self, MayBeErased, Ty, TyCtxt, TypeFlags, TypeFoldable, TypeSuperVisitable, TypeVisitable,
-    TypeVisitableExt, TypeVisitor, TypingMode,
+    self, CanonicalizerState, MayBeErased, Ty, TyCtxt, TypeFlags, TypeFoldable, TypeSuperVisitable,
+    TypeVisitable, TypeVisitableExt, TypeVisitor, TypingMode,
 };
 use rustc_next_trait_solver::solve::{GoalStalledOn, GoalStalledOnOpaques, TyOrConstInferVar};
 use rustc_span::{DUMMY_SP, Span};
@@ -164,7 +166,7 @@ impl<'tcx> rustc_next_trait_solver::delegate::SolverDelegate for SolverDelegate<
                 && self.known_no_opaque_types_in_storage()
                 {
                     goal_stalled_on_args_or_nonempty_opaques(thin_vec![TyOrConstInferVar::Ty(vid)])
-                } else if trait_pred.polarity() == ty::PredicatePolarity::Positive {
+                } else if trait_pred.polarity() == ty::ClausePolarity::Positive {
                     match self.0.tcx.as_lang_item(trait_pred.def_id()) {
                         Some(LangItem::Sized) | Some(LangItem::MetaSized) => {
                             let predicate = self.resolve_vars_if_possible(goal.predicate);
@@ -318,19 +320,23 @@ impl<'tcx> rustc_next_trait_solver::delegate::SolverDelegate for SolverDelegate<
         self.0.leak_check(max_input_universe, None).map_err(|_| NoSolution)
     }
 
-    fn evaluate_const(
+    fn evaluate_const<E: Debug>(
         &self,
         param_env: ty::ParamEnv<'tcx>,
         alias_const: ty::AliasConst<'tcx>,
-    ) -> Option<ty::Const<'tcx>> {
+        normalize_ty: impl FnOnce(ty::Unnormalized<'tcx, Ty<'tcx>>) -> Result<Ty<'tcx>, E>,
+    ) -> Result<Option<ty::Const<'tcx>>, E> {
         let ct = ty::Const::new_alias(self.tcx, ty::IsRigid::No, alias_const);
 
-        match crate::traits::try_evaluate_const(&self.0, ct, param_env) {
-            Ok(ct) => Some(ct),
-            Err(EvaluateConstErr::EvaluationFailure(e)) => Some(ty::Const::new_error(self.tcx, e)),
+        match crate::traits::try_evaluate_const(&self.0, ct, param_env, normalize_ty) {
+            Ok(ct) => Ok(Some(ct)),
+            Err(EvaluateConstErr::EvaluationFailure(e)) => {
+                Ok(Some(ty::Const::new_error(self.tcx, e)))
+            }
             Err(
                 EvaluateConstErr::InvalidConstParamTy(_) | EvaluateConstErr::HasGenericsOrInfers,
-            ) => None,
+            ) => Ok(None),
+            Err(EvaluateConstErr::FailedNormalization(e)) => Err(e),
         }
     }
 
@@ -486,5 +492,16 @@ impl<'tcx> rustc_next_trait_solver::delegate::SolverDelegate for SolverDelegate<
             rustc_transmute::Answer::Yes => Ok(Certainty::Yes),
             rustc_transmute::Answer::No(_) | rustc_transmute::Answer::If(_) => Err(NoSolution),
         }
+    }
+
+    fn obtain_canonicalizer_state(&self) -> CanonicalizerState<Self::Interner> {
+        // We temporarily take the canonicalizer state.
+        mem::take(&mut self.canonicalizer_state.borrow_mut())
+    }
+
+    fn release_canonicalizer_state(&self, mut state: CanonicalizerState<Self::Interner>) {
+        // Clear (don't deallocate) the state for later reuse.
+        state.clear();
+        *self.canonicalizer_state.borrow_mut() = state;
     }
 }

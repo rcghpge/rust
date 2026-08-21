@@ -1213,6 +1213,12 @@ where
         matches!(this.ty.kind(), ty::Adt(def, _) if def.repr().transparent())
     }
 
+    /// Is this type `core::num::Complex<T>`?
+    fn is_complex_number_lang_item(this: TyAndLayout<'tcx>, cx: &C) -> bool {
+        let Some(def) = this.ty.ty_adt_def() else { return false };
+        cx.tcx().is_lang_item(def.did(), LangItem::Complex)
+    }
+
     fn is_scalable_vector(this: TyAndLayout<'tcx>) -> bool {
         this.ty.is_scalable_vector()
     }

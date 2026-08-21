@@ -16,9 +16,10 @@ use crate::core::build_steps::tool::{
     self, RustcPrivateCompilers, SourceType, Tool, prepare_tool_cargo,
 };
 use crate::core::builder::{
-    self, Builder, CommandLineStep, Compiler, Kind, RunConfig, ShouldRun, Step, StepMetadata,
+    self, Builder, CommandLineStep, Kind, RunConfig, ShouldRun, Step, StepMetadata,
     crate_description,
 };
+use crate::core::compiler::Compiler;
 use crate::core::config::{Config, TargetSelection};
 use crate::utils::helpers::{submodule_path_of, symlink_dir, t, up_to_date};
 use crate::{FileType, Mode};

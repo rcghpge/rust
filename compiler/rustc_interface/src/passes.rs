@@ -660,7 +660,7 @@ fn write_out_deps(tcx: TyCtxt<'_>, outputs: &OutputFilenames, out_filenames: &[P
                 checksum_hash_algo,
             ));
         }
-        if let Some(ref profile_sample) = sess.opts.unstable_opts.profile_sample_use {
+        if let Some(ref profile_sample) = sess.opts.cg.profile_sample_use {
             files.extend(hash_iter_files(
                 iter::once(normalize_path(profile_sample.as_path().to_path_buf())),
                 checksum_hash_algo,
@@ -1011,8 +1011,8 @@ pub fn create_and_enter_global_ctxt<T, F: for<'tcx> FnOnce(TyCtxt<'tcx>) -> T>(
         untracked,
         incr_comp_session.as_ref(),
         dep_graph,
-        rustc_query_impl::make_dep_kind_vtables(&arena),
         rustc_query_impl::query_system(
+            &arena,
             providers.queries,
             providers.extern_queries,
             query_result_on_disk_cache,
@@ -1332,7 +1332,7 @@ pub(crate) fn start_codegen<'tcx>(
                 rustc_monomorphize::write_host_metadata_offload_manifest(tcx);
             }
 
-            // Linker::link will skip join_codegen in case of a CodegenResults Any value.
+            // Linker::link will skip join_codegen in case of a `CompiledModules` Any value.
             Box::new(CompiledModules { modules: vec![], allocator_module: None })
         } else {
             codegen_backend.codegen_crate(tcx)

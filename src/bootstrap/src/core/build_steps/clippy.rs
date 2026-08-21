@@ -14,18 +14,20 @@
 //! (as usual) a massive undertaking/refactoring.
 
 use super::tool::{SourceType, prepare_tool_cargo};
+use crate::Mode;
 use crate::core::build_steps::check::{CompilerForCheck, prepare_compiler_for_check};
 use crate::core::build_steps::compile::{
     ArtifactKeepMode, run_cargo, rustc_cargo, std_cargo, std_crates_for_make_run,
 };
-use crate::core::builder;
 use crate::core::builder::{
-    Alias, Builder, CommandLineStep, Kind, RunConfig, ShouldRun, StepMetadata, crate_description,
+    self, Alias, Builder, CommandLineStep, Kind, RunConfig, ShouldRun, StepMetadata,
+    crate_description,
 };
-use crate::core::config::{Subcommand, TargetSelection};
+use crate::core::compiler::Compiler;
+use crate::core::config::TargetSelection;
+use crate::core::config::flags::Subcommand;
 use crate::utils::build_stamp::{self, BuildStamp};
 use crate::utils::helpers;
-use crate::{Compiler, Mode};
 
 /// Disable the most spammy clippy lints
 const IGNORED_RULES_FOR_STD_AND_RUSTC: &[&str] = &[
@@ -589,6 +591,10 @@ impl CommandLineStep for CI {
                 "clippy::ptr_offset_with_cast".into(),
                 "clippy::let_and_return".into(),
                 "clippy::needless_return".into(),
+                "clippy::needless_borrow".into(),
+                "clippy::op_ref".into(),
+                "clippy::borrow_deref_ref".into(),
+                "clippy::explicit_auto_deref".into(),
             ],
             forbid: vec![],
         };

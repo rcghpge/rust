@@ -607,9 +607,9 @@ impl SingleAttributeParser for LangParser {
             return None;
         };
 
-        // Only weak lang items may be applied to foreign items
-        if [Target::ForeignFn, Target::ForeignStatic, Target::ForeignTy, Target::ForeignMod]
-            .contains(&cx.target)
+        // Only weak lang items may be applied to foreign items,
+        // except for `ForeignTy` which can be a normal lang item.
+        if [Target::ForeignFn, Target::ForeignStatic, Target::ForeignMod].contains(&cx.target)
             && !lang_item.is_weak()
         {
             cx.emit_err(UnknownExternLangItem { span: cx.attr_span, lang_item: lang_item.name() });
@@ -1132,7 +1132,7 @@ pub(crate) struct RustcDocPrimitiveParser;
 
 impl SingleAttributeParser for RustcDocPrimitiveParser {
     const PATH: &[Symbol] = &[sym::rustc_doc_primitive];
-    const ALLOWED_TARGETS: AllowedTargets<'_> = AllowedTargets::AllowList(&[Allow(Target::Mod)]);
+    const ALLOWED_TARGETS: AllowedTargets<'_> = AllowedTargets::AllowList(&[Allow(Target::Const)]);
     const TEMPLATE: AttributeTemplate = template!(NameValueStr: "primitive name");
     const STABILITY: AttributeStability = unstable!(
         rustc_attrs,
