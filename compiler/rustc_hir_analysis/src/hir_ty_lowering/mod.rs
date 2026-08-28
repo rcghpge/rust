@@ -1,3 +1,5 @@
+// ignore-tidy-file-filelength
+
 //! HIR ty lowering: Lowers type-system entities[^1] from the [HIR][hir] to
 //! the [`rustc_middle::ty`] representation.
 //!
@@ -37,6 +39,7 @@ use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::{self as hir, AnonConst, GenericArg, GenericArgs, HirId};
 use rustc_infer::infer::{InferCtxt, TyCtxtInferExt};
 use rustc_infer::traits::DynCompatibilityViolation;
+use rustc_lint_defs::builtin::AMBIGUOUS_ASSOCIATED_ITEMS;
 use rustc_macros::{TypeFoldable, TypeVisitable};
 use rustc_middle::middle::stability::AllowUnstable;
 use rustc_middle::ty::{
@@ -46,7 +49,6 @@ use rustc_middle::ty::{
 };
 use rustc_middle::{bug, span_bug};
 use rustc_session::diagnostics::feature_err;
-use rustc_session::lint::builtin::AMBIGUOUS_ASSOCIATED_ITEMS;
 use rustc_span::def_id::ModId;
 use rustc_span::{DUMMY_SP, Ident, Span, kw, sym};
 use rustc_trait_selection::infer::InferCtxtExt;
@@ -56,7 +58,9 @@ use tracing::{debug, instrument};
 use crate::check::check_abi;
 use crate::check_c_variadic_abi;
 use crate::diagnostics::{self, BadReturnTypeNotation, NoFieldOnType, NoVariantNamed};
-use crate::hir_ty_lowering::errors::{GenericsArgsErrExtend, prohibit_assoc_item_constraint};
+use crate::hir_ty_lowering::errors::{
+    GenericsArgsErrExtend, eq_ctxt_suggestion_span, prohibit_assoc_item_constraint,
+};
 use crate::hir_ty_lowering::generics::{check_generic_arg_count, lower_generic_args};
 use crate::middle::resolve_bound_vars as rbv;
 
@@ -2521,6 +2525,31 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
         ty::Const::new_value(tcx, valtree, ty)
     }
 
+    fn try_recover_misrepresented_function_call(
+        &self,
+        hir_self_ty: &hir::Ty<'_>,
+        span: Span,
+    ) -> Option<ErrorGuaranteed> {
+        // Only an enum can host a tuple-variant constructor (`<Option<u32>>::Some(..)`).
+        // For any other self type, a type-relative call is an associated function, not a
+        // constructor, and must be wrapped in `const { ... }`. We catch that here, before
+        // lowering the self type, so a generic struct/union written without its args
+        // (`FieldName::len()`, from `tracing`'s macros) reports this clear error instead
+        // of a spurious E0107 "missing generics" (#157152), and a primitive or foreign
+        // type reports it instead of an opaque downstream resolution error. Enums,
+        // aliases, `Self` and type parameters are let through: each may resolve to an
+        // enum, so they must reach constructor lowering.
+        let self_ty_res = match hir_self_ty.kind {
+            hir::TyKind::Path(hir::QPath::Resolved(_, path)) => path.res,
+            _ => Res::Err,
+        };
+        matches!(
+            self_ty_res,
+            Res::Def(DefKind::Struct | DefKind::Union | DefKind::ForeignTy, _) | Res::PrimTy(_)
+        )
+        .then(|| self.dcx().emit_err(diagnostics::ComplexConstArg { span }))
+    }
+
     fn lower_const_arg_tuple_call(
         &self,
         hir_id: HirId,
@@ -2541,6 +2570,10 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                 self.lower_resolved_const_path(opt_self_ty, path, hir_id)
             }
             hir::QPath::TypeRelative(hir_self_ty, segment) => {
+                if let Some(e) = self.try_recover_misrepresented_function_call(hir_self_ty, span) {
+                    return ty::Const::new_error(tcx, e);
+                }
+
                 let self_ty = self.lower_ty(hir_self_ty);
                 match self.lower_type_relative_const_path(
                     self_ty,
@@ -2574,10 +2607,7 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                 (tcx.adt_def(parent_did), fn_args, parent_did)
             }
             _ => {
-                let e = self.dcx().span_err(
-                    span,
-                    "complex const arguments must be placed inside of a `const` block",
-                );
+                let e = self.dcx().emit_err(diagnostics::ComplexConstArg { span });
                 return Const::new_error(tcx, e);
             }
         };
@@ -2991,7 +3021,8 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                 | DefKind::Closure
                 | DefKind::ExternCrate
                 | DefKind::GlobalAsm
-                | DefKind::SyntheticCoroutineBody,
+                | DefKind::SyntheticCoroutineBody
+                | DefKind::TestBinderConstraints,
                 _,
             )
             | Res::PrimTy(_)
@@ -3302,18 +3333,18 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                         .next()
                 {
                     // `let x: S::new(valid_in_ty_ctxt);` -> `let x = S::new(valid_in_ty_ctxt);`
-                    let err = tcx
-                        .dcx()
-                        .struct_span_err(
-                            hir_ty.span,
-                            "expected type, found associated function call",
-                        )
-                        .with_span_suggestion_verbose(
-                            stmt.pat.span.between(hir_ty.span),
+                    let mut err = tcx.dcx().struct_span_err(
+                        hir_ty.span,
+                        "expected type, found associated function call",
+                    );
+                    if let Some(between) = eq_ctxt_suggestion_span(stmt.pat.span, hir_ty.span) {
+                        err.span_suggestion_verbose(
+                            between,
                             "use `=` if you meant to assign",
-                            " = ".to_string(),
+                            " = ",
                             Applicability::MaybeIncorrect,
                         );
+                    }
                     self.dcx().try_steal_replace_and_emit_err(
                         hir_ty.span,
                         StashKey::ReturnTypeNotation,
@@ -3328,18 +3359,18 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                 {
                     // `let x: i32::something(valid_in_ty_ctxt);` -> `let x = i32::something(valid_in_ty_ctxt);`
                     // FIXME: Check that `something` is a valid function in `i32`.
-                    let err = tcx
-                        .dcx()
-                        .struct_span_err(
-                            hir_ty.span,
-                            "expected type, found associated function call",
-                        )
-                        .with_span_suggestion_verbose(
-                            stmt.pat.span.between(hir_ty.span),
+                    let mut err = tcx.dcx().struct_span_err(
+                        hir_ty.span,
+                        "expected type, found associated function call",
+                    );
+                    if let Some(between) = eq_ctxt_suggestion_span(stmt.pat.span, hir_ty.span) {
+                        err.span_suggestion_verbose(
+                            between,
                             "use `=` if you meant to assign",
-                            " = ".to_string(),
+                            " = ",
                             Applicability::MaybeIncorrect,
                         );
+                    }
                     self.dcx().try_steal_replace_and_emit_err(
                         hir_ty.span,
                         StashKey::ReturnTypeNotation,
