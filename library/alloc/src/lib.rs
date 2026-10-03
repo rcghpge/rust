@@ -58,7 +58,6 @@
 
 #![allow(unused_features)]
 #![allow(incomplete_features)]
-#![allow(unused_attributes)]
 #![expect(clippy::partialeq_ne_impl, reason = "we need to implement ne for a lot of alloc types")]
 #![stable(feature = "alloc", since = "1.36.0")]
 #![doc(
@@ -90,7 +89,7 @@
 //
 // Library features:
 // tidy-alphabetical-start
-#![feature(allocator_api)]
+#![feature(allocator_ext)]
 #![feature(array_into_iter_constructors)]
 #![feature(ascii_char)]
 #![feature(async_fn_traits)]
@@ -128,7 +127,6 @@
 #![feature(derive_const)]
 #![feature(diagnostic_on_move)]
 #![feature(dispatch_from_dyn)]
-#![feature(drop_guard)]
 #![feature(ergonomic_clones)]
 #![feature(error_generic_member_access)]
 #![feature(exact_size_is_empty)]
@@ -150,6 +148,7 @@
 #![feature(legacy_receiver_trait)]
 #![feature(likely_unlikely)]
 #![feature(local_waker)]
+#![feature(marker_trait_attr)]
 #![feature(maybe_uninit_array_assume_init)]
 #![feature(maybe_uninit_fill)]
 #![feature(maybe_uninit_uninit_array_transpose)]
@@ -160,6 +159,7 @@
 #![feature(ptr_cast_slice)]
 #![feature(ptr_internals)]
 #![feature(ptr_metadata)]
+#![feature(random)]
 #![feature(raw_os_error_ty)]
 #![feature(rev_into_inner)]
 #![feature(seek_stream_len)]
@@ -186,7 +186,6 @@
 #![feature(ub_checks)]
 #![feature(unicode_internals)]
 #![feature(unsize)]
-#![feature(unwrap_infallible)]
 #![feature(write_all_vectored)]
 #![feature(wtf8_internals)]
 // tidy-alphabetical-end
@@ -230,11 +229,24 @@
 // from other crates, but since this can only appear for lang items, it doesn't seem worth fixing.
 #![feature(intra_doc_pointers)]
 
+#[cfg(not(no_rc))]
+#[stable(feature = "rust1", since = "1.0.0")]
+pub use rcs::rc;
+
 // Module with internal macros used by other modules (needs to be included before other modules).
 #[macro_use]
 mod macros;
 
 mod raw_vec;
+
+/// Implementations of reference-counted pointers.
+#[cfg(not(no_rc))]
+mod rcs {
+    pub mod rc;
+
+    #[cfg(all(not(no_sync), target_has_atomic = "ptr"))]
+    pub(crate) mod arc;
+}
 
 // Heaps provided for low-level allocation strategies
 pub mod alloc;
@@ -256,8 +268,6 @@ pub mod intrinsics;
 #[unstable(feature = "alloc_io", issue = "154046")]
 pub mod io;
 pub mod panicking;
-#[cfg(not(no_rc))]
-pub mod rc;
 pub mod slice;
 pub mod str;
 pub mod string;

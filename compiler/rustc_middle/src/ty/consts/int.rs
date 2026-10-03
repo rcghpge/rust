@@ -6,6 +6,7 @@ use rustc_apfloat::Float;
 use rustc_apfloat::ieee::{Double, Half, Quad, Single};
 use rustc_data_structures::stable_hash::{StableHash, StableHashCtxt};
 use rustc_serialize::{Decodable, Decoder, Encodable, Encoder};
+use rustc_span::bug;
 
 use crate::ty::TyCtxt;
 
@@ -262,15 +263,17 @@ impl ScalarInt {
 
     /// Convert this ScalarInt to the underlying bits.
     #[inline]
-    pub fn to_bits(self, target_size: Size) -> u128 {
-        assert_ne!(target_size.bytes(), 0, "you should never look at the bits of a ZST");
-        assert_eq!(
-            target_size.bytes(),
-            u64::from(self.size.get()),
-            "ScalarInt has size {} but expected {}",
-            self.size,
-            target_size.bytes(),
-        );
+    pub fn to_bits(self, expected_size: Size) -> u128 {
+        let self_size = u64::from(self.size.get());
+        if expected_size.bytes() != self_size {
+            #[cold]
+            fn invalid(expected_size: u64, self_size: u64) -> ! {
+                panic!("ScalarInt has size {self_size} but expected {expected_size}")
+            }
+
+            invalid(expected_size.bytes(), self_size);
+        }
+
         self.check_data();
         self.data
     }

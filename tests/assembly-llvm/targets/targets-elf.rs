@@ -43,6 +43,9 @@
 //@ revisions: aarch64_unknown_hermit
 //@ [aarch64_unknown_hermit] compile-flags: --target aarch64-unknown-hermit
 //@ [aarch64_unknown_hermit] needs-llvm-components: aarch64
+//@ revisions: aarch64_unknown_hyperlight
+//@ [aarch64_unknown_hyperlight] compile-flags: --target aarch64-unknown-hyperlight
+//@ [aarch64_unknown_hyperlight] needs-llvm-components: aarch64
 //@ revisions: aarch64_unknown_illumos
 //@ [aarch64_unknown_illumos] compile-flags: --target aarch64-unknown-illumos
 //@ [aarch64_unknown_illumos] needs-llvm-components: aarch64
@@ -403,6 +406,9 @@
 //@ revisions: msp430_none_elf
 //@ [msp430_none_elf] compile-flags: --target msp430-none-elf
 //@ [msp430_none_elf] needs-llvm-components: msp430
+//@ revisions: powerpc64_sony_ps3
+//@ [powerpc64_sony_ps3] compile-flags: --target powerpc64-sony-ps3
+//@ [powerpc64_sony_ps3] needs-llvm-components: powerpc
 //@ revisions: powerpc64_unknown_freebsd
 //@ [powerpc64_unknown_freebsd] compile-flags: --target powerpc64-unknown-freebsd
 //@ [powerpc64_unknown_freebsd] needs-llvm-components: powerpc
@@ -721,6 +727,9 @@
 //@ revisions: x86_64_unknown_hermit
 //@ [x86_64_unknown_hermit] compile-flags: --target x86_64-unknown-hermit
 //@ [x86_64_unknown_hermit] needs-llvm-components: x86
+//@ revisions: x86_64_unknown_hyperlight
+//@ [x86_64_unknown_hyperlight] compile-flags: --target x86_64-unknown-hyperlight
+//@ [x86_64_unknown_hyperlight] needs-llvm-components: x86
 //@ revisions: x86_64_unknown_illumos
 //@ [x86_64_unknown_illumos] compile-flags: --target x86_64-unknown-illumos
 //@ [x86_64_unknown_illumos] needs-llvm-components: x86
@@ -817,27 +826,28 @@
 //@ revisions: riscv64gc_unknown_nuttx_elf
 //@ [riscv64gc_unknown_nuttx_elf] compile-flags: --target riscv64gc-unknown-nuttx-elf
 //@ [riscv64gc_unknown_nuttx_elf] needs-llvm-components: riscv
-// FIXME: disabled since it requires a custom LLVM until the upstream LLVM adds support for the target (https://github.com/espressif/llvm-project/issues/4)
-/*
-    revisions: xtensa_esp32_none_elf
-    [xtensa_esp32_none_elf] compile-flags: --target xtensa-esp32-none-elf
-    [xtensa_esp32_none_elf] needs-llvm-components: xtensa
-    revisions: xtensa_esp32_espidf
-    [xtensa_esp32_espidf] compile-flags: --target xtensa-esp32s2-espidf
-    [xtensa_esp32_espidf] needs-llvm-components: xtensa
-    revisions: xtensa_esp32s2_none_elf
-    [xtensa_esp32s2_none_elf] compile-flags: --target xtensa-esp32s2-none-elf
-    [xtensa_esp32s2_none_elf] needs-llvm-components: xtensa
-    revisions: xtensa_esp32s2_espidf
-    [xtensa_esp32s2_espidf] compile-flags: --target xtensa-esp32s2-espidf
-    [xtensa_esp32s2_espidf] needs-llvm-components: xtensa
-    revisions: xtensa_esp32s3_none_elf
-    [xtensa_esp32s3_none_elf] compile-flags: --target xtensa-esp32s3-none-elf
-    [xtensa_esp32s3_none_elf] needs-llvm-components: xtensa
-    revisions: xtensa_esp32s3_espidf
-    [xtensa_esp32s3_espidf] compile-flags: --target xtensa-esp32s3-espidf
-    [xtensa_esp32s3_espidf] needs-llvm-components: xtensa
-*/
+//@ revisions: xtensa_esp32_none_elf
+//@ [xtensa_esp32_none_elf] compile-flags: --target xtensa-esp32-none-elf
+//@ [xtensa_esp32_none_elf] needs-llvm-components: xtensa
+//@ revisions: xtensa_esp32_espidf
+//@ [xtensa_esp32_espidf] compile-flags: --target xtensa-esp32s2-espidf
+//@ [xtensa_esp32_espidf] needs-llvm-components: xtensa
+//@ revisions: xtensa_esp32s2_none_elf
+//@ [xtensa_esp32s2_none_elf] compile-flags: --target xtensa-esp32s2-none-elf
+//@ [xtensa_esp32s2_none_elf] needs-llvm-components: xtensa
+//@ revisions: xtensa_esp32s2_espidf
+//@ [xtensa_esp32s2_espidf] compile-flags: --target xtensa-esp32s2-espidf
+//@ [xtensa_esp32s2_espidf] needs-llvm-components: xtensa
+//@ revisions: xtensa_esp32s3_none_elf
+//@ [xtensa_esp32s3_none_elf] compile-flags: --target xtensa-esp32s3-none-elf
+//@ [xtensa_esp32s3_none_elf] needs-llvm-components: xtensa
+//@ revisions: xtensa_esp32s3_espidf
+//@ [xtensa_esp32s3_espidf] compile-flags: --target xtensa-esp32s3-espidf
+//@ [xtensa_esp32s3_espidf] needs-llvm-components: xtensa
+
+// xtensa support requires a more recent LLVM.
+//@ min-llvm-version: 22
+
 // Sanity-check that each target can produce assembly code.
 
 #![feature(no_core, lang_items)]

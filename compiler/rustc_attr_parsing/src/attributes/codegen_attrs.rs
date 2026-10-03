@@ -349,7 +349,7 @@ impl NoArgsAttributeParser for TrackCallerParser {
     const STABILITY: AttributeStability = AttributeStability::Stable;
     const CREATE: fn(Span) -> AttributeKind = AttributeKind::TrackCaller;
 
-    fn finalize_check(cx: &FinalizeCheckContext<'_, '_>, attr_span: Span) {
+    fn finalize_check(cx: &mut FinalizeCheckContext<'_, '_>, attr_span: Span) {
         match cx.target {
             Target::Fn => {
                 // `#[track_caller]` is not valid on weak lang items because they are called via
@@ -363,6 +363,15 @@ impl NoArgsAttributeParser for TrackCallerParser {
                         sig_span: cx.target_span,
                     });
                 }
+            }
+            Target::Closure if !cx.features().closure_track_caller() => {
+                feature_err(
+                    cx.sess(),
+                    sym::closure_track_caller,
+                    attr_span,
+                    "`#[track_caller]` on closures is currently unstable",
+                )
+                .emit();
             }
             _ => {}
         }
@@ -562,7 +571,7 @@ impl CombineAttributeParser for TargetFeatureParser {
         parse_tf_attribute(cx, args)
     }
 
-    fn finalize_check(cx: &FinalizeCheckContext<'_, '_>, attr_span: Span) {
+    fn finalize_check(cx: &mut FinalizeCheckContext<'_, '_>, attr_span: Span) {
         // `#[target_feature]` is incompatible with lang item functions,
         // except on WASM where calling target-feature functions is safe (see #84988).
         if !cx.sess().target.is_like_wasm && !cx.sess().opts.actually_rustdoc {
@@ -671,6 +680,7 @@ impl SingleAttributeParser for SanitizeParser {
         r#"kcfi = "on|off""#,
         r#"memory = "on|off""#,
         r#"memtag = "on|off""#,
+        r#"safestack = "on|off""#,
         r#"shadow_call_stack = "on|off""#,
         r#"thread = "on|off""#,
         r#"realtime = "nonblocking|blocking|caller""#,
@@ -717,6 +727,7 @@ impl SingleAttributeParser for SanitizeParser {
                 sym::kcfi => apply(SanitizerSet::KCFI),
                 sym::memory => apply(SanitizerSet::MEMORY),
                 sym::memtag => apply(SanitizerSet::MEMTAG),
+                sym::safestack => apply(SanitizerSet::SAFESTACK),
                 sym::shadow_call_stack => apply(SanitizerSet::SHADOWCALLSTACK),
                 sym::thread => apply(SanitizerSet::THREAD),
                 sym::hwaddress | sym::kernel_hwaddress => {
@@ -743,6 +754,7 @@ impl SingleAttributeParser for SanitizeParser {
                             sym::kcfi,
                             sym::memory,
                             sym::memtag,
+                            sym::safestack,
                             sym::shadow_call_stack,
                             sym::thread,
                             sym::hwaddress,

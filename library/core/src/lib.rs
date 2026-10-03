@@ -108,6 +108,7 @@
 #![feature(adt_const_params)]
 #![feature(allow_internal_unsafe)]
 #![feature(allow_internal_unstable)]
+#![feature(arbitrary_self_types_pointers)]
 #![feature(auto_traits)]
 #![feature(cfg_sanitize)]
 #![feature(cfg_target_has_atomic)]
@@ -130,7 +131,6 @@
 #![feature(final_associated_functions)]
 #![feature(freeze_impls)]
 #![feature(fundamental)]
-#![feature(funnel_shifts)]
 #![feature(impl_restriction)]
 #![feature(intra_doc_pointers)]
 #![feature(intrinsics)]
@@ -229,6 +229,11 @@ pub mod offload;
 #[unstable(feature = "contracts", issue = "128044")]
 pub mod contracts;
 
+#[allow(clippy::useless_attribute)]
+#[expect(
+    ineffective_unstable_reexports,
+    reason = "accepted as stable after accidental stabilization in 1.96, see #154645"
+)]
 #[unstable(feature = "derive_macro_global_path", issue = "154645")]
 pub use crate::macros::builtin::derive;
 #[stable(feature = "cfg_select", since = "1.95.0")]
@@ -361,7 +366,6 @@ pub mod primitive;
     unused_imports,
     unsafe_op_in_unsafe_fn,
     ambiguous_glob_reexports,
-    deprecated_in_future,
     unreachable_pub,
     // FIXME: stdach is a submodule so clippy lints should be fixed (and ideally enforced) there
     clippy::all,

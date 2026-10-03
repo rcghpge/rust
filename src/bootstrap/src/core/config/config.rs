@@ -27,11 +27,9 @@ use serde::Deserialize;
 use tracing::{instrument, span};
 
 use crate::core::backend::CodegenBackendKind;
-use crate::core::build_steps::llvm;
 use crate::core::build_steps::llvm::{LLVM_INVALIDATION_PATHS, LlvmKind, LlvmOutput};
 use crate::core::build_steps::test::failed_tests::collect_previously_failed_tests;
 use crate::core::config::flags::{Color, Flags, Subcommand, Warnings};
-use crate::core::config::macros::check_ci_llvm;
 use crate::core::config::target_selection::TargetSelectionList;
 use crate::core::config::toml::TomlConfig;
 use crate::core::config::toml::build::{Build, Tool};
@@ -448,21 +446,22 @@ impl Config {
             // Undo `src/bootstrap`
             manifest_dir.parent().unwrap().parent().unwrap().to_owned()
         };
-        let src = if let Some(s) = compute_src_directory(flags_src, &exec_ctx) {
-            s
-        } else {
-            default_src_dir.clone()
-        };
 
-        #[cfg(test)]
-        {
-            if let Some(config_path) = flags_config.as_ref() {
-                assert!(
+        // Determine the root of the `rust-lang/rust` source directory from one of:
+        // - An explicit command-line argument `--src=PATH`.
+        // - Running git to find a checkout directory from the current working directory.
+        // - The source directory that this bootstrap executable was built from.
+        let src = flags_src
+            .or_else(|| compute_src_directory_via_git(&exec_ctx))
+            .unwrap_or_else(|| default_src_dir.clone());
+
+        if cfg!(test) {
+            match flags_config.as_deref() {
+                Some(config_path) => assert!(
                     !config_path.starts_with(&src),
                     "Path {config_path:?} should not be inside or equal to src dir {src:?}"
-                );
-            } else {
-                panic!("During test the config should be explicitly added");
+                ),
+                None => panic!("During test the config should be explicitly added"),
             }
         }
 
@@ -1058,23 +1057,37 @@ impl Config {
             }
         }
 
-        let llvm_from_ci = parse_download_ci_llvm(
-            &dwn_ctx,
-            &rust_info,
-            &download_rustc_commit,
-            llvm_download_ci_llvm,
-            llvm_assertions,
-        );
+        let llvm_ci_mode = parse_download_ci_llvm(llvm_download_ci_llvm);
 
-        // FIXME: llvm_ci_mode should eventually represent what was used in the config, not the
-        // dynamic value used for determining whether it is actually available.
-        let llvm_ci_mode =
-            if llvm_from_ci { LlvmCiMode::DownloadFromCi } else { LlvmCiMode::BuildLocally };
+        // Sanity checks
+        match llvm_ci_mode {
+            LlvmCiMode::DownloadIfUnchanged => {
+                if rust_info.is_from_tarball() {
+                    // Git is needed for running "if-unchanged" logic.
+                    panic!("ERROR: 'if-unchanged' is only compatible with Git managed sources.");
+                }
+            }
+            LlvmCiMode::Download => {
+                if cfg!(not(test))
+                    && ci_env.is_running_in_ci()
+                    && CiEnv::is_rust_lang_managed_ci_job()
+                {
+                    // On rust-lang CI, we must always rebuild LLVM if there were any modifications to it
+                    panic!(
+                        "`llvm.download-ci-llvm` cannot be set to `true` on CI. Use `if-unchanged` instead."
+                    );
+                }
+            }
+            LlvmCiMode::BuildLocally => {
+                if download_rustc_commit.is_some() {
+                    panic!(
+                        "`llvm.download-ci-llvm` cannot be set to `false` if `rust.download-rustc` is set to `true` or `if-unchanged`."
+                    );
+                }
+            }
+        }
 
-        let is_host_system_llvm =
-            target_config.get(&host_target).and_then(|c| c.llvm_config.as_ref()).is_some();
-
-        if llvm_from_ci {
+        if llvm_ci_mode.requests_download_from_ci() {
             let warn = |option: &str| {
                 println!(
                     "WARNING: `{option}` will only be used on `compiler/rustc_llvm` build, not for the LLVM build."
@@ -1107,14 +1120,12 @@ impl Config {
                     "HELP: To use `llvm.libzstd` for LLVM/LLD builds, set `download-ci-llvm` option to false."
                 );
             }
-
-            if let Some(target) = target_config.get(&host_target) {
-                check_ci_llvm!(target.llvm_config);
-                check_ci_llvm!(target.llvm_filecheck);
-            }
         }
 
-        for (target, linker_override) in default_linux_linker_overrides() {
+        let is_host_system_llvm =
+            target_config.get(&host_target).and_then(|c| c.llvm_config.as_ref()).is_some();
+
+        for (target, linker_override) in default_linux_linker_overrides(&channel) {
             // If the user overrode the default Linux linker, do not apply bootstrap defaults
             if targets_with_user_linker_override.contains(&target) {
                 continue;
@@ -1385,8 +1396,7 @@ NOTE: Please add `--stage 2` to your command line, or if you're sure you want to
         // If we're building with ThinLTO on, by default we want to link
         // to LLVM shared, to avoid re-doing ThinLTO (which happens in
         // the link step) with each stage.
-        let llvm_link_shared =
-            llvm_link_shared.or((!llvm_from_ci && llvm_thin_lto.unwrap_or(false)).then_some(true));
+        let llvm_link_shared = llvm_link_shared.or(llvm_thin_lto.unwrap_or(false).then_some(true));
 
         Config {
             // tidy-alphabetical-start
@@ -1735,18 +1745,15 @@ NOTE: Please add `--stage 2` to your command line, or if you're sure you want to
                 Some(commit) => {
                     self.download_ci_rustc(commit);
 
-                    // CI-rustc can't be used without CI-LLVM. If `self.llvm_from_ci` is false, it means the "if-unchanged"
-                    // logic has detected some changes in the LLVM submodule (download-ci-llvm=false can't happen here as
-                    // we don't allow it while parsing the configuration).
-                    if !self.llvm_ci_mode.download_from_ci() {
-                        // This happens when LLVM submodule is updated in CI, we should disable ci-rustc without an error
-                        // to not break CI. For non-CI environments, we should return an error.
-                        if self.is_running_on_ci() {
-                            println!("WARNING: LLVM submodule has changes, `download-rustc` will be disabled.");
-                            return None;
-                        } else {
-                            panic!("ERROR: LLVM submodule has changes, `download-rustc` can't be used.");
-                        }
+                    let llvm_ci_requested = self.llvm_ci_mode.requests_download_from_ci();
+                    // CI-rustc can't be used without CI-LLVM. If CI LLVM is requested, but the
+                    // LLVM submodule has changes, it is an error.
+                    // FIXME: this whole logic should be refactored to not use
+                    // `has_changes_from_upstream` explicitly
+                    if llvm_ci_requested && self.has_changes_from_upstream(LLVM_INVALIDATION_PATHS) {
+                        // download-ci-rustc should not be used on CI at the moment
+                        assert!(!self.is_running_on_ci());
+                        panic!("ERROR: LLVM submodule has changes, `download-rustc` can't be used.");
                     }
 
                     if let Some(config_path) = &self.config {
@@ -2038,54 +2045,49 @@ fn reconcile_jemalloc(
     }
 }
 
-fn compute_src_directory(src_dir: Option<PathBuf>, exec_ctx: &ExecutionContext) -> Option<PathBuf> {
-    if let Some(src) = src_dir {
-        return Some(src);
-    } else {
-        // Infer the source directory. This is non-trivial because we want to support a downloaded bootstrap binary,
-        // running on a completely different machine from where it was compiled.
-        let mut cmd = helpers::git(None);
-        // NOTE: we cannot support running from outside the repository because the only other path we have available
-        // is set at compile time, which can be wrong if bootstrap was downloaded rather than compiled locally.
-        // We still support running outside the repository if we find we aren't in a git directory.
+fn compute_src_directory_via_git(exec_ctx: &ExecutionContext) -> Option<PathBuf> {
+    // Infer the source directory. This is non-trivial because we want to support a downloaded bootstrap binary,
+    // running on a completely different machine from where it was compiled.
+    // NOTE: we cannot support running from outside the repository because the only other path we have available
+    // is set at compile time, which can be wrong if bootstrap was downloaded rather than compiled locally.
+    // We still support running outside the repository if we find we aren't in a git directory.
 
-        // NOTE: We get a relative path from git to work around an issue on MSYS/mingw. If we used an absolute path,
-        // and end up using MSYS's git rather than git-for-windows, we would get a unix-y MSYS path. But as bootstrap
-        // has already been (kinda-cross-)compiled to Windows land, we require a normal Windows path.
-        cmd.arg("rev-parse").arg("--show-cdup");
-        // Discard stderr because we expect this to fail when building from a tarball.
-        let output = cmd.allow_failure().run_capture_stdout(exec_ctx);
-        if output.is_success() {
-            let git_root_relative = output.stdout();
-            // We need to canonicalize this path to make sure it uses backslashes instead of forward slashes,
-            // and to resolve any relative components.
-            let git_root = env::current_dir()
-                .unwrap()
-                .join(PathBuf::from(git_root_relative.trim()))
-                .canonicalize()
-                .unwrap();
-            let s = git_root.to_str().unwrap();
+    // NOTE: We get a relative path from git (`--show-cdup`) to work around an issue on MSYS/mingw.
+    // If we used an absolute path, and end up using MSYS's git rather than git-for-windows, we would
+    // get a unix-y MSYS path. But as bootstrap has already been (kinda-cross-)compiled to Windows land,
+    // we require a normal Windows path.
 
-            // Bootstrap is quite bad at handling /? in front of paths
-            let git_root = match s.strip_prefix("\\\\?\\") {
-                Some(p) => PathBuf::from(p),
-                None => git_root,
-            };
-            // If this doesn't have at least `stage0`, we guessed wrong. This can happen when,
-            // for example, the build directory is inside of another unrelated git directory.
-            // In that case keep the original `CARGO_MANIFEST_DIR` handling.
-            //
-            // NOTE: this implies that downloadable bootstrap isn't supported when the build directory is outside
-            // the source directory. We could fix that by setting a variable from all three of python, ./x, and x.ps1.
-            if git_root.join("src").join("stage0").exists() {
-                return Some(git_root);
-            }
-        } else {
-            // We're building from a tarball, not git sources.
-            // We don't support pre-downloaded bootstrap in this case.
-        }
+    // Ask git to print the path of the repository root, relative to the working directory.
+    // If the working directory is the repo root, the output will be empty, which is fine.
+    let mut cmd = helpers::git(None);
+    cmd.arg("rev-parse").arg("--show-cdup");
+    // Discard stderr because we expect this to fail when building from a tarball.
+    let output = cmd.allow_failure().run_capture_stdout(exec_ctx);
+    if output.is_failure() {
+        // We're building from a tarball, not git sources.
+        // We don't support pre-downloaded bootstrap in this case.
+        return None;
+    }
+
+    // We need to canonicalize this path to make sure it uses backslashes instead of forward slashes,
+    // and to resolve any relative components.
+    let stdout = output.stdout();
+    let relative_root = stdout.trim();
+    let git_root = env::current_dir().unwrap().join(relative_root).canonicalize().unwrap();
+
+    // Bootstrap is quite bad at handling /? in front of paths
+    let git_root = match git_root.to_str().unwrap().strip_prefix("\\\\?\\") {
+        Some(p) => PathBuf::from(p),
+        None => git_root,
     };
-    None
+
+    // If this doesn't have at least `./src/stage0`, we guessed wrong. This can happen when,
+    // for example, the build directory is inside of another unrelated git directory.
+    // In that case keep the original `CARGO_MANIFEST_DIR` handling.
+    //
+    // NOTE: this implies that downloadable bootstrap isn't supported when the build directory is outside
+    // the source directory. We could fix that by setting a variable from all three of python, ./x, and x.ps1.
+    if git_root.join("src").join("stage0").exists() { Some(git_root) } else { None }
 }
 
 #[derive(Clone)]
@@ -2431,62 +2433,17 @@ pub fn git_config(stage0_metadata: &build_helper::stage0_parser::Stage0) -> GitC
     }
 }
 
-pub fn parse_download_ci_llvm<'a>(
-    dwn_ctx: impl AsRef<DownloadContext<'a>>,
-    rust_info: &channel::GitInfo,
-    download_rustc_commit: &Option<String>,
-    download_ci_llvm: Option<StringOrBool>,
-    asserts: bool,
-) -> bool {
-    let dwn_ctx = dwn_ctx.as_ref();
+pub fn parse_download_ci_llvm(download_ci_llvm: Option<StringOrBool>) -> LlvmCiMode {
     let download_ci_llvm = download_ci_llvm.unwrap_or(StringOrBool::Bool(true));
-
-    let if_unchanged = || {
-        if rust_info.is_from_tarball() {
-            // Git is needed for running "if-unchanged" logic.
-            println!("ERROR: 'if-unchanged' is only compatible with Git managed sources.");
-            helpers::exit_process(1);
-        }
-
-        // Fetching the LLVM submodule is unnecessary for self-tests.
-        if cfg!(not(test)) {
-            update_submodule(dwn_ctx, rust_info, "src/llvm-project");
-        }
-
-        // Check for untracked changes in `src/llvm-project` and other important places.
-        let has_changes = has_changes_from_upstream(dwn_ctx, LLVM_INVALIDATION_PATHS);
-
-        // Return false if there are untracked changes, otherwise check if CI LLVM is available.
-        if has_changes {
-            false
-        } else {
-            llvm::is_ci_llvm_available_for_target(&dwn_ctx.host_target, asserts)
-        }
-    };
-
     match download_ci_llvm {
         StringOrBool::Bool(b) => {
-            if !b && download_rustc_commit.is_some() {
-                panic!(
-                    "`llvm.download-ci-llvm` cannot be set to `false` if `rust.download-rustc` is set to `true` or `if-unchanged`."
-                );
+            if b {
+                LlvmCiMode::Download
+            } else {
+                LlvmCiMode::BuildLocally
             }
-
-            if cfg!(not(test))
-                && b
-                && dwn_ctx.is_running_on_ci()
-                && CiEnv::is_rust_lang_managed_ci_job()
-            {
-                // On rust-lang CI, we must always rebuild LLVM if there were any modifications to it
-                panic!(
-                    "`llvm.download-ci-llvm` cannot be set to `true` on CI. Use `if-unchanged` instead."
-                );
-            }
-
-            // If download-ci-llvm=true we also want to check that CI llvm is available
-            b && llvm::is_ci_llvm_available_for_target(&dwn_ctx.host_target, asserts)
         }
-        StringOrBool::String(s) if s == "if-unchanged" => if_unchanged(),
+        StringOrBool::String(s) if s == "if-unchanged" => LlvmCiMode::DownloadIfUnchanged,
         StringOrBool::String(other) => {
             panic!("unrecognized option for download-ci-llvm: {other:?}")
         }

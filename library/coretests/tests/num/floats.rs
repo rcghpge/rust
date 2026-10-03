@@ -1328,10 +1328,10 @@ float_test! {
     name: clamp_min_greater_than_max,
     attrs: {
         const: #[cfg(false)],
-        f16: #[should_panic, cfg(target_has_reliable_f16)],
+        f16: #[should_panic, cfg(target_has_reliable_f16_math)],
         f32: #[should_panic],
         f64: #[should_panic],
-        f128: #[should_panic, cfg(target_has_reliable_f128)],
+        f128: #[should_panic, cfg(target_has_reliable_f128_math)],
     },
     test {
         let _ = Float::ONE.clamp(3.0, 1.0);
@@ -1342,10 +1342,10 @@ float_test! {
     name: clamp_min_is_nan,
     attrs: {
         const: #[cfg(false)],
-        f16: #[should_panic, cfg(target_has_reliable_f16)],
+        f16: #[should_panic, cfg(target_has_reliable_f16_math)],
         f32: #[should_panic],
         f64: #[should_panic],
-        f128: #[should_panic, cfg(target_has_reliable_f128)],
+        f128: #[should_panic, cfg(target_has_reliable_f128_math)],
     },
     test {
         let _ = Float::ONE.clamp(Float::NAN, 1.0);
@@ -1356,13 +1356,55 @@ float_test! {
     name: clamp_max_is_nan,
     attrs: {
         const: #[cfg(false)],
-        f16: #[should_panic, cfg(target_has_reliable_f16)],
+        f16: #[should_panic, cfg(target_has_reliable_f16_math)],
         f32: #[should_panic],
         f64: #[should_panic],
-        f128: #[should_panic, cfg(target_has_reliable_f128)],
+        f128: #[should_panic, cfg(target_has_reliable_f128_math)],
     },
     test {
         let _ = Float::ONE.clamp(3.0, Float::NAN);
+    }
+}
+
+float_test! {
+    name: clamp_to_min_greater_than_max,
+    attrs: {
+        const: #[cfg(false)],
+        f16: #[should_panic, cfg(target_has_reliable_f16_math)],
+        f32: #[should_panic],
+        f64: #[should_panic],
+        f128: #[should_panic, cfg(target_has_reliable_f128_math)],
+    },
+    test {
+        let _ = Float::ONE.clamp_to(3.0..=1.0);
+    }
+}
+
+float_test! {
+    name: clamp_to_min_is_nan,
+    attrs: {
+        const: #[cfg(false)],
+        f16: #[should_panic, cfg(target_has_reliable_f16_math)],
+        f32: #[should_panic],
+        f64: #[should_panic],
+        f128: #[should_panic, cfg(target_has_reliable_f128_math)],
+    },
+    test {
+        let _ = Float::ONE.clamp_to(Float::NAN..=1.0);
+    }
+}
+
+float_test! {
+    name: clamp_to_max_is_nan,
+    attrs: {
+        const: #[cfg(false)],
+        f16: #[should_panic, cfg(target_has_reliable_f16_math)],
+        f32: #[should_panic],
+        f64: #[should_panic],
+        f128: #[should_panic, cfg(target_has_reliable_f128_math)],
+    },
+    test {
+        let _ = Float::ONE.clamp_to(3.0..=Float::NAN);
     }
 }
 
@@ -2140,24 +2182,26 @@ float_test! {
     }
 }
 
-// FIXME(f128): Uncomment and adapt these tests once the From<{u64,i64}> impls are added.
-// float_test! {
-//     name: from_u64_i64,
-//     attrs: {
-//         f16: #[cfg(false)],
-//         f32: #[cfg(false)],
-//         f64: #[cfg(false)],
-//         f128: #[cfg(target_has_reliable_f128)],
-//     },
-//     test {
-//         assert_biteq!(Float::from(u64::MIN), Float::ZERO);
-//         assert_biteq!(Float::from(42_u64), 42.0);
-//         assert_biteq!(Float::from(u64::MAX), 18446744073709551615.0);
-//         assert_biteq!(Float::from(i64::MIN), -9223372036854775808.0);
-//         assert_biteq!(Float::from(42_i64), 42.0);
-//         assert_biteq!(Float::from(i64::MAX), 9223372036854775807.0);
-//     }
-// }
+float_test! {
+    name: from_u64_i64,
+    attrs: {
+        f16: #[cfg(false)],
+        const f16: #[cfg(false)],
+        f32: #[cfg(false)],
+        const f32: #[cfg(false)],
+        f64: #[cfg(false)],
+        const f64: #[cfg(false)],
+        f128: #[cfg(target_has_reliable_f128)],
+    },
+    test {
+        assert_biteq!(Float::from(u64::MIN), Float::ZERO);
+        assert_biteq!(Float::from(42_u64), 42.0f128);
+        assert_biteq!(Float::from(u64::MAX), 18446744073709551615.0);
+        assert_biteq!(Float::from(i64::MIN), -9223372036854775808.0);
+        assert_biteq!(Float::from(42_i64), 42.0);
+        assert_biteq!(Float::from(i64::MAX), 9223372036854775807.0);
+    }
+}
 
 float_test! {
     name: real_consts,

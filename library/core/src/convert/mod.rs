@@ -815,10 +815,10 @@ const impl<T, U> TryFrom<U> for T
 where
     U: [const] Into<T>,
 {
-    type Error = Infallible;
+    type Error = !;
 
     #[inline]
-    fn try_from(value: U) -> Result<Self, Self::Error> {
+    fn try_from(value: U) -> Result<Self, !> {
         Ok(U::into(value))
     }
 }
@@ -886,7 +886,8 @@ const impl AsMut<str> for str {
 /// }
 /// ```
 ///
-/// Note: since CURRENT_RUSTC_VERSION this is an alias to `!`. If targeting that or future versions,
-/// prefer using the never type directly.
+/// Note: Since [`!`] (the "never" type) was stabilized in Rust 1.100.0, it is
+/// preferred to use `!` directly unless targeting older Rust versions. `Infallible` may be
+/// deprecated in a future Rust version.
 #[stable(feature = "convert_infallible", since = "1.34.0")]
 pub type Infallible = !;

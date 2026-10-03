@@ -95,8 +95,8 @@ use crate::patch::MirPatch;
 pub(super) struct EarlyOtherwiseBranch;
 
 impl<'tcx> crate::MirPass<'tcx> for EarlyOtherwiseBranch {
-    fn policy(&self, sess: &rustc_session::Session) -> PassPolicy {
-        PassPolicy::optimization(sess.mir_opt_level() >= 2)
+    fn policy(&self, ctx: &crate::PassCtx<'_>) -> PassPolicy {
+        PassPolicy::optional(ctx.mir_opt_level() >= 2)
     }
 
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
@@ -175,7 +175,7 @@ impl<'tcx> crate::MirPass<'tcx> for EarlyOtherwiseBranch {
                         discr: parent_op,
                         targets: eq_targets,
                     },
-                    attributes: ThinVec::new(),
+                    loop_hint_attrs: ThinVec::new(),
                 }),
                 bbs[parent].is_cleanup,
             );
@@ -230,7 +230,7 @@ fn evaluate_candidate<'tcx>(
     let Terminator {
         kind: TerminatorKind::SwitchInt { targets: child_targets, discr: child_discr },
         source_info,
-        attributes: _,
+        loop_hint_attrs: _,
     } = bbs[child].terminator()
     else {
         return None;

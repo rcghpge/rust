@@ -588,7 +588,7 @@ impl f16 {
     /// conserved over arithmetic operations, the result of `is_sign_positive` on
     /// a NaN might produce an unexpected or non-portable result. See the [specification
     /// of NaN bit patterns](f32#nan-bit-patterns) for more info. Use `self.signum() == 1.0`
-    /// if you need fully portable behavior (will return `false` for all NaNs).
+    /// if you need fully portable behavior (evaluates to `false` for all NaNs).
     ///
     /// ```
     /// #![feature(f16)]
@@ -616,7 +616,7 @@ impl f16 {
     /// conserved over arithmetic operations, the result of `is_sign_negative` on
     /// a NaN might produce an unexpected or non-portable result. See the [specification
     /// of NaN bit patterns](f32#nan-bit-patterns) for more info. Use `self.signum() == -1.0`
-    /// if you need fully portable behavior (will return `false` for all NaNs).
+    /// if you need fully portable behavior (evaluates to `false` for all NaNs).
     ///
     /// ```
     /// #![feature(f16)]
@@ -1469,7 +1469,7 @@ impl f16 {
     ///
     /// ```
     /// #![feature(f16)]
-    /// # #[cfg(target_has_reliable_f16)] {
+    /// # #[cfg(target_has_reliable_f16_math)] {
     ///
     /// assert!((-3.0f16).clamp(-2.0, 1.0) == -2.0);
     /// assert!((0.0f16).clamp(-2.0, 1.0) == 0.0);
@@ -1530,12 +1530,50 @@ impl f16 {
     /// ```
     #[inline]
     #[unstable(feature = "clamp_magnitude", issue = "148519")]
-    #[must_use = "this returns the clamped value and does not modify the original"]
+    #[rustc_const_unstable(feature = "clamp_magnitude", issue = "148519")]
+    #[must_use = "method returns a new number and does not mutate the original value"]
     #[expect(clippy::neg_cmp_op_on_partial_ord, reason = "NaN is also invalid")]
-    pub fn clamp_magnitude(self, limit: f16) -> f16 {
+    pub const fn clamp_magnitude(self, limit: f16) -> f16 {
         assert!(limit >= 0.0, "limit must be non-negative and not NaN");
         let limit = limit.abs(); // Canonicalises -0.0 to 0.0
         self.clamp(-limit, limit)
+    }
+
+    /// Restrict a value to a certain range, unless it is NaN.
+    ///
+    /// This is largely equal to `max`, `min`, or `clamp`, depending on whether the range is
+    /// `min..`, `..=max`, or `min..=max`, respectively. However, unlike `max` and `min`, it will
+    /// panic if any bound is NaN.
+    ///
+    /// Note that this function returns NaN if the initial value was NaN as
+    /// well.
+    ///
+    /// Exclusive ranges are not permitted.
+    ///
+    /// # Panics
+    ///
+    /// Panics on `min..=max` if `min > max`, or if any bound is NaN.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(f16, clamp_to)]
+    /// # #[cfg(target_has_reliable_f16_math)] {
+    /// assert_eq!((-3.0f16).clamp_to(-2.0..=1.0), -2.0);
+    /// assert_eq!(0.0f16.clamp_to(-2.0..=1.0), 0.0);
+    /// assert_eq!(2.0f16.clamp_to(..=1.0), 1.0);
+    /// assert_eq!(5.0f16.clamp_to(7.0..), 7.0);
+    /// assert!(f16::NAN.clamp_to(1.0..=2.0).is_nan());
+    /// # }
+    /// ```
+    #[must_use]
+    #[inline]
+    #[unstable(feature = "clamp_to", issue = "147781")]
+    pub fn clamp_to<R>(self, range: R) -> Self
+    where
+        R: crate::cmp::ClampBounds<Self>,
+    {
+        range.clamp(self)
     }
 
     /// Computes the absolute value of `self`.
@@ -1944,6 +1982,42 @@ impl f16 {
     #[must_use = "method returns a new number and does not mutate the original value"]
     pub const fn mul_add(self, a: f16, b: f16) -> f16 {
         intrinsics::fmaf16(self, a, b)
+    }
+
+    /// Computes `(self * a) + b` with nondeterministic rounding.
+    ///
+    /// This is similar to [`mul_add`](Self::mul_add), but the intermediate
+    /// result may be rounded differently depending on the implementation.
+    /// The operation is either executed as a single fused multiply-add
+    /// instruction, or as separate multiply and add instructions.
+    ///
+    /// The choice of which one is used is unspecified and non-deterministic:
+    /// it may vary by target, optimization level, and surrounding code, and
+    /// even two invocations of this operation with the same inputs may
+    /// produce different results.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(f16)]
+    /// #![feature(float_mul_add_relaxed)]
+    /// # #[cfg(target_has_reliable_f16)] {
+    ///
+    /// // When the fused and unfused operations round differently, either
+    /// // result may be returned:
+    /// // - -7.03e-6 is the fused result (one rounding)
+    /// // - -7.6e-6 is the unfused result (two roundings)
+    /// let r = 0.1_f16.mul_add_relaxed(0.1_f16, -0.01_f16);
+    /// assert!(r == -7.03e-6 || r == -7.6e-6);
+    /// # }
+    /// ```
+    #[inline]
+    #[rustc_allow_incoherent_impl]
+    #[doc(alias = "fmuladd")]
+    #[unstable(feature = "float_mul_add_relaxed", issue = "151770")]
+    #[must_use = "method returns a new number and does not mutate the original value"]
+    pub const fn mul_add_relaxed(self, a: f16, b: f16) -> f16 {
+        intrinsics::fmuladdf16(self, a, b)
     }
 
     /// Calculates Euclidean division, the matching method for `rem_euclid`.

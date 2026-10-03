@@ -5,12 +5,10 @@ use rustc_errors::{Applicability, Diag, IntoDiagArg};
 use rustc_hir as hir;
 use rustc_hir::def::Namespace;
 use rustc_hir::def_id::{CRATE_DEF_ID, DefId};
-use rustc_middle::bug;
 use rustc_middle::ty::error::ExpectedFound;
 use rustc_middle::ty::print::{FmtPrinter, Print, PrintTraitRefExt as _, RegionHighlightMode};
-use rustc_middle::ty::{
-    self, GenericArgsRef, IsSuggestable, RePlaceholder, Region, RegionExt, TyCtxt,
-};
+use rustc_middle::ty::{self, GenericArgsRef, IsSuggestable, RePlaceholder, Region, TyCtxt};
+use rustc_span::bug;
 use rustc_structures::Limit;
 use tracing::{debug, instrument};
 
@@ -257,15 +255,43 @@ impl<'tcx> NiceRegionError<'_, 'tcx> {
     ) -> Diag<'tcx> {
         let span = cause.span;
 
+        let mut code = cause.code();
+        loop {
+            match code {
+                ObligationCauseCode::MatchImpl(inner_cause, _) => {
+                    code = inner_cause.code();
+                }
+                ObligationCauseCode::ImplDerived(derived) => {
+                    code = &derived.derived.parent_code;
+                }
+                ObligationCauseCode::BuiltinDerived(derived) => {
+                    code = &derived.parent_code;
+                }
+                ObligationCauseCode::WellFormedDerived(derived) => {
+                    code = &derived.parent_code;
+                }
+                ObligationCauseCode::ImplDerivedHost(derived) => {
+                    code = &derived.derived.parent_code;
+                }
+                ObligationCauseCode::BuiltinDerivedHost(derived) => {
+                    code = &derived.parent_code;
+                }
+                _ => break,
+            }
+        }
         let (leading_ellipsis, satisfy_span, where_span, dup_span, def_id) =
             if let ObligationCauseCode::WhereClause(def_id, span)
-            | ObligationCauseCode::WhereClauseInExpr(def_id, span, ..) = *cause.code()
+            | ObligationCauseCode::WhereClauseInExpr(def_id, span, ..) = *code
                 && def_id != CRATE_DEF_ID.to_def_id()
             {
                 (
                     true,
                     Some(span),
-                    Some(self.tcx().def_span(def_id)),
+                    Some(
+                        self.tcx()
+                            .opt_item_ident(def_id)
+                            .map_or_else(|| self.tcx().def_span(def_id), |n| n.span),
+                    ),
                     None,
                     self.tcx().def_path_str(def_id),
                 )
@@ -273,16 +299,12 @@ impl<'tcx> NiceRegionError<'_, 'tcx> {
                 (false, None, None, Some(span), String::new())
             };
 
-        let expected_trait_ref = self.cx.resolve_vars_if_possible(ty::TraitRef::new_from_args(
-            self.cx.tcx,
-            trait_def_id,
-            expected_args,
-        ));
-        let actual_trait_ref = self.cx.resolve_vars_if_possible(ty::TraitRef::new_from_args(
-            self.cx.tcx,
-            trait_def_id,
-            actual_args,
-        ));
+        let expected_trait_ref = self.cx.deeply_resolve_ignoring_regions(
+            ty::TraitRef::new_from_args(self.cx.tcx, trait_def_id, expected_args),
+        );
+        let actual_trait_ref = self.cx.deeply_resolve_ignoring_regions(
+            ty::TraitRef::new_from_args(self.cx.tcx, trait_def_id, actual_args),
+        );
 
         // Search the expected and actual trait references to see (a)
         // whether the sub/sup placeholders appear in them (sometimes
@@ -362,6 +384,17 @@ impl<'tcx> NiceRegionError<'_, 'tcx> {
 
         let mut current_code = cause.code();
         let mut coroutine_def_id = None;
+        if cause.body_def_id != CRATE_DEF_ID {
+            self.cx.note_obligation_cause_code(
+                cause.body_def_id,
+                &mut err,
+                actual_trait_ref,
+                self.tcx().param_env(cause.body_def_id),
+                cause.code(),
+                &mut vec![],
+                &mut Default::default(),
+            );
+        }
 
         loop {
             match current_code {
@@ -402,7 +435,7 @@ impl<'tcx> NiceRegionError<'_, 'tcx> {
         // the confusing lifetime-generality error into an actionable hint, e.g.:
         //   |buf|  →  |buf: &mut [u8]|
         if self.tcx().is_fn_trait(trait_def_id) {
-            let actual_self_ty = self.cx.resolve_vars_if_possible(
+            let actual_self_ty = self.cx.deeply_resolve_ignoring_regions(
                 ty::TraitRef::new_from_args(self.cx.tcx, trait_def_id, actual_args).self_ty(),
             );
             if let ty::Closure(closure_def_id, _) = *actual_self_ty.kind()

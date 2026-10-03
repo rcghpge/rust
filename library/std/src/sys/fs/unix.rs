@@ -1,10 +1,41 @@
 #![allow(nonstandard_style)]
 #![allow(unsafe_op_in_unsafe_fn)]
-// miri has some special hacks here that make things unused.
-#![cfg_attr(miri, allow(unused))]
 
 #[cfg(test)]
 mod tests;
+
+// Import the file operations under consistent names.
+cfg_select! {
+    not(any(
+        all(target_os = "linux", not(target_env = "musl")),
+        target_os = "android",
+        target_os = "hurd",
+        target_os = "l4re",
+    )) => {
+        use libc::{
+            dirent as dirent64, fstat as fstat64, ftruncate as ftruncate64, lseek as lseek64,
+            lstat as lstat64, off_t as off64_t, open as open64, stat as stat64,
+        };
+    }
+    target_os = "android" => {
+        // Android's `stat`, `dirent`, and related functions are always 64-bit LFS compatible, and
+        // `open` already implies `O_LARGEFILE`, so all those don't need to follow Linux.
+        // However, we still need off64_t, ftruncate64, and lseek64.
+        use libc::{
+            dirent as dirent64, fstat as fstat64, ftruncate64, lseek64, lstat as lstat64, off64_t,
+            open as open64, stat as stat64,
+        };
+    }
+    target_os = "l4re" => {
+        use libc::{
+            dirent64, fstat as fstat64, ftruncate as ftruncate64, lseek as lseek64,
+            lstat as lstat64, off_t as off64_t, open as open64, stat as stat64,
+        };
+    }
+    _ => {
+        use libc::{dirent64, fstat64, ftruncate64, lseek64, lstat64, off64_t, open64, stat64};
+    }
+}
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 use libc::c_char;
@@ -17,39 +48,15 @@ use libc::c_char;
     target_vendor = "apple",
 ))]
 use libc::dirfd;
-#[cfg(any(target_os = "fuchsia", target_os = "illumos", target_vendor = "apple"))]
-use libc::fstatat as fstatat64;
-#[cfg(any(all(target_os = "linux", not(target_env = "musl")), target_os = "hurd"))]
-use libc::fstatat64;
 use libc::{c_int, mode_t};
-#[cfg(target_os = "android")]
-use libc::{
-    dirent as dirent64, fstat as fstat64, fstatat as fstatat64, ftruncate64, lseek64,
-    lstat as lstat64, off64_t, open as open64, stat as stat64,
-};
-#[cfg(not(any(
-    all(target_os = "linux", not(target_env = "musl")),
-    target_os = "android",
-    target_os = "hurd",
-    target_os = "l4re",
-)))]
-use libc::{
-    dirent as dirent64, fstat as fstat64, ftruncate as ftruncate64, lseek as lseek64,
-    lstat as lstat64, off_t as off64_t, open as open64, stat as stat64,
-};
-#[cfg(target_os = "l4re")]
-use libc::{
-    dirent64, fstat as fstat64, ftruncate as ftruncate64, lseek as lseek64, lstat as lstat64,
-    off_t as off64_t, open as open64, stat as stat64,
-};
-#[cfg(any(all(target_os = "linux", not(target_env = "musl")), target_os = "hurd"))]
-use libc::{dirent64, fstat64, ftruncate64, lseek64, lstat64, off64_t, open64, stat64};
 
 use crate::ffi::{CStr, OsStr, OsString};
 use crate::fmt::{self, Write as _};
 use crate::fs::TryLockError;
 use crate::io::{self, BorrowedCursor, Error, IoSlice, IoSliceMut, SeekFrom};
 use crate::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd};
+#[cfg(not(target_os = "wasi"))]
+pub use crate::os::unix::fs::dirs::{ExtraHomeDirs, ExtraMediaDirs};
 #[cfg(target_family = "unix")]
 use crate::os::unix::prelude::*;
 #[cfg(target_os = "wasi")]
@@ -58,6 +65,8 @@ use crate::path::{Path, PathBuf};
 use crate::sync::Arc;
 use crate::sys::fd::FileDesc;
 pub use crate::sys::fs::common::exists;
+#[cfg(target_os = "wasi")]
+pub use crate::sys::fs::common::{ExtraHomeDirs, ExtraMediaDirs};
 use crate::sys::helpers::run_path_with_cstr;
 use crate::sys::time::SystemTime;
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
@@ -953,7 +962,7 @@ impl Iterator for ReadDir {
     }
 }
 
-/// Aborts the process if a file desceriptor is not open, if debug asserts are enabled
+/// Aborts the process if a file descriptor is not open, if debug asserts are enabled
 ///
 /// Many IO syscalls can't be fully trusted about EBADF error codes because those
 /// might get bubbled up from a remote FUSE server rather than the file descriptor
@@ -977,7 +986,6 @@ impl Drop for DirStream {
     fn drop(&mut self) {
         // dirfd isn't supported everywhere
         #[cfg(not(any(
-            miri,
             target_os = "redox",
             target_os = "nto",
             target_os = "qnx",
@@ -1016,89 +1024,58 @@ impl DirEntry {
         self.file_name_os_str().to_os_string()
     }
 
-    #[cfg(all(
-        any(
-            all(target_os = "linux", not(target_env = "musl")),
-            target_os = "android",
-            target_os = "fuchsia",
-            target_os = "hurd",
-            target_os = "illumos",
-            target_vendor = "apple",
-        ),
-        not(miri) // no dirfd on Miri
-    ))]
     pub fn metadata(&self) -> io::Result<FileAttr> {
-        let fd = cvt(unsafe { dirfd(self.dir.dirp.0) })?;
-        let name = self.name.as_ptr();
+        cfg_select! {
+            // Use directory handle where possible
+            any(
+                all(target_os = "linux", not(target_env = "musl")),
+                target_os = "android",
+                target_os = "fuchsia",
+                target_os = "hurd",
+                target_os = "illumos",
+                target_vendor = "apple",
+            ) => {
+                let fd = cvt(unsafe { dirfd(self.dir.dirp.0) })?;
 
-        cfg_has_statx! {
-            if let Some(ret) = unsafe { try_statx(
-                fd,
-                name,
-                libc::AT_SYMLINK_NOFOLLOW | libc::AT_STATX_SYNC_AS_STAT,
-                libc::STATX_BASIC_STATS | libc::STATX_BTIME,
-            ) } {
-                return ret;
+                // Make this FD into a directory handle. We don't actually drop it,
+                // so having an `OwnedFd` is fine.
+                let dir_handle =
+                    mem::ManuallyDrop::new(dir::Dir(unsafe { OwnedFd::from_raw_fd(fd) }));
+
+                dir_handle.metadata_c(&self.name, /* symlink_nofollow */ true)
             }
-        }
 
-        let mut stat: stat64 = unsafe { mem::zeroed() };
-        cvt(unsafe { fstatat64(fd, name, &mut stat, libc::AT_SYMLINK_NOFOLLOW) })?;
-        Ok(FileAttr::from_stat64(stat))
+            // Fallback based on path
+            _ => run_path_with_cstr(&self.path(), &lstat),
+        }
     }
 
-    #[cfg(any(
-        not(any(
-            all(target_os = "linux", not(target_env = "musl")),
-            target_os = "android",
-            target_os = "fuchsia",
-            target_os = "hurd",
+    pub fn file_type(&self) -> io::Result<FileType> {
+        // Use `entry.d_type` if available.
+        #[cfg(not(any(
+            target_os = "solaris",
             target_os = "illumos",
-            target_vendor = "apple",
-        )),
-        miri // no dirfd on Miri
-    ))]
-    pub fn metadata(&self) -> io::Result<FileAttr> {
-        run_path_with_cstr(&self.path(), &lstat)
-    }
-
-    #[cfg(any(
-        target_os = "solaris",
-        target_os = "illumos",
-        target_os = "haiku",
-        target_os = "vxworks",
-        target_os = "aix",
-        target_os = "nto",
-        target_os = "qnx",
-        target_os = "vita",
-        target_os = "l4re",
-    ))]
-    pub fn file_type(&self) -> io::Result<FileType> {
-        self.metadata().map(|m| m.file_type())
-    }
-
-    #[cfg(not(any(
-        target_os = "solaris",
-        target_os = "illumos",
-        target_os = "haiku",
-        target_os = "vxworks",
-        target_os = "aix",
-        target_os = "nto",
-        target_os = "qnx",
-        target_os = "vita",
-        target_os = "l4re",
-    )))]
-    pub fn file_type(&self) -> io::Result<FileType> {
+            target_os = "haiku",
+            target_os = "vxworks",
+            target_os = "aix",
+            target_os = "nto",
+            target_os = "qnx",
+            target_os = "vita",
+            target_os = "l4re",
+        )))]
         match self.entry.d_type {
-            libc::DT_CHR => Ok(FileType { mode: libc::S_IFCHR }),
-            libc::DT_FIFO => Ok(FileType { mode: libc::S_IFIFO }),
-            libc::DT_LNK => Ok(FileType { mode: libc::S_IFLNK }),
-            libc::DT_REG => Ok(FileType { mode: libc::S_IFREG }),
-            libc::DT_SOCK => Ok(FileType { mode: libc::S_IFSOCK }),
-            libc::DT_DIR => Ok(FileType { mode: libc::S_IFDIR }),
-            libc::DT_BLK => Ok(FileType { mode: libc::S_IFBLK }),
-            _ => self.metadata().map(|m| m.file_type()),
+            libc::DT_CHR => return Ok(FileType { mode: libc::S_IFCHR }),
+            libc::DT_FIFO => return Ok(FileType { mode: libc::S_IFIFO }),
+            libc::DT_LNK => return Ok(FileType { mode: libc::S_IFLNK }),
+            libc::DT_REG => return Ok(FileType { mode: libc::S_IFREG }),
+            libc::DT_SOCK => return Ok(FileType { mode: libc::S_IFSOCK }),
+            libc::DT_DIR => return Ok(FileType { mode: libc::S_IFDIR }),
+            libc::DT_BLK => return Ok(FileType { mode: libc::S_IFBLK }),
+            _ => {}
         }
+
+        // Fall back to loading the metadata.
+        self.metadata().map(|m| m.file_type())
     }
 
     pub fn ino(&self) -> u64 {
@@ -1333,6 +1310,7 @@ impl File {
                 target_os = "illumos",
                 target_os = "aix",
                 target_os = "android",
+                target_os = "redox",
                 target_vendor = "apple",
             ) => {
                 cvt(unsafe { libc::flock(self.as_raw_fd(), libc::LOCK_EX) })?;
@@ -1355,6 +1333,7 @@ impl File {
                 target_os = "illumos",
                 target_os = "aix",
                 target_os = "android",
+                target_os = "redox",
                 target_vendor = "apple",
             ) => {
                 cvt(unsafe { libc::flock(self.as_raw_fd(), libc::LOCK_SH) })?;
@@ -1377,6 +1356,7 @@ impl File {
                 target_os = "illumos",
                 target_os = "aix",
                 target_os = "android",
+                target_os = "redox",
                 target_vendor = "apple",
             ) => {
                 let result =
@@ -1411,6 +1391,7 @@ impl File {
                 target_os = "illumos",
                 target_os = "aix",
                 target_os = "android",
+                target_os = "redox",
                 target_vendor = "apple",
             ) => {
                 let result =
@@ -1445,6 +1426,7 @@ impl File {
                 target_os = "illumos",
                 target_os = "aix",
                 target_os = "android",
+                target_os = "redox",
                 target_vendor = "apple",
             ) => {
                 cvt(unsafe { libc::flock(self.as_raw_fd(), libc::LOCK_UN) })?;
@@ -1884,31 +1866,99 @@ pub fn set_perm(p: &CStr, perm: FilePermissions) -> io::Result<()> {
     cvt_r(|| unsafe { libc::chmod(p.as_ptr(), perm.mode) }).map(|_| ())
 }
 
+#[cfg(target_os = "vxworks")]
+pub fn set_perm_nofollow(_p: &CStr, _perm: FilePermissions) -> io::Result<()> {
+    // VxWorks has no `O_NOFOLLOW`, and its `fchmodat` rejects
+    // `AT_SYMLINK_NOFOLLOW` with `ENOTSUP`, so a no-follow chmod is unsupported.
+    Err(crate::io::ErrorKind::Unsupported.into())
+}
+
+#[cfg(target_os = "android")]
+pub fn set_perm_nofollow(_p: &CStr, _perm: FilePermissions) -> io::Result<()> {
+    // Currently Android seems to be having inconsistent behavior with fchmodat
+    // with `AT_SYMLINK_NOFOLLOW` or openat with `O_NOFOLLOW` + fchmod.
+    // See this issue here mentioning inconsistent behavior on fchmodat:
+    // https://github.com/android/ndk/issues/1258
+    // On the arm-android CI job, using fchmodat with `AT_SYMLINK_NOFOLLOW` +
+    // fallback behavior on a symlink sets the target file's permissions,
+    // which is incorrect behavior.
+    Err(crate::io::ErrorKind::Unsupported.into())
+}
+
+#[cfg(not(any(target_os = "android", target_os = "vxworks")))]
 pub fn set_perm_nofollow(p: &CStr, perm: FilePermissions) -> io::Result<()> {
-    // ESP-IDF and Horizon do not support O_NOFOLLOW, so we skip setting it.
-    // Their filesystems do not have symbolic links, so no special handling is required.
-    cfg_select! {
-        // wasm32-wasip1 targets do not support fchmodat, so we fall down to
-        // open + fchmod
-        target_os = "wasi" => {
-            use crate::fs::{OpenOptions, Permissions};
-            use crate::os::wasi::ffi::OsStrExt;
+    #[inline]
+    /// Helper function for fallback open with `O_NOFOLLOW` + `fchmod` behavior
+    fn open_and_set_permissions(p: &CStr, perm: FilePermissions) -> io::Result<()> {
+        use crate::fs::{OpenOptions, Permissions};
+
+        let mut options = OpenOptions::new();
+        options.read(true);
+
+        // ESP-IDF and Horizon do not support O_NOFOLLOW, so we skip setting it.
+        // Their filesystems do not have symbolic links, so no special handling is required.
+        #[cfg(not(any(target_os = "espidf", target_os = "horizon")))]
+        {
+            #[cfg(not(target_os = "wasi"))]
+            use crate::os::unix::fs::OpenOptionsExt;
+            #[cfg(target_os = "wasi")]
             use crate::os::wasi::fs::OpenOptionsExt;
-
-            let mut options = OpenOptions::new();
             options.custom_flags(libc::O_NOFOLLOW);
+        }
 
-            let bytes = p.to_bytes();
-            let os_str = OsStr::from_bytes(bytes);
-            options.open(Path::new(os_str))?.set_permissions(Permissions::from_inner(perm))
+        // SAFETY: Since this function is called with `with_native_path`
+        // and that successfully converted the `&Path` to a `CString`,
+        // it should be safe to convert the `&CStr` back to a `Path`.
+        let os_str = unsafe { OsStr::from_encoded_bytes_unchecked(p.to_bytes()) };
+        options.open(Path::new(os_str))?.set_permissions(Permissions::from_inner(perm))
+    }
+
+    // This res value is modified for platforms that support the `fchmodat` syscall.
+    #[allow(unused)]
+    let mut res: Result<(), core::io::Error> = Err(crate::io::ErrorKind::Unsupported.into());
+
+    // These platforms support `fchmodat`, so utilize this syscall over `open` + `fchmod`
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly",
+        target_os = "nto",
+        target_os = "qnx"
+    ))]
+    {
+        res = cvt_r(|| unsafe {
+            libc::fchmodat(libc::AT_FDCWD, p.as_ptr(), perm.mode, libc::AT_SYMLINK_NOFOLLOW)
+        })
+        .map(|_| ());
+    }
+
+    // If fchmodat fails with `ErrorKind::Unsupported` fallback to using open + fchmod. This is just in case
+    // for older systems like Ubuntu 20.04 where fchmodat fails with EOPNOTSUPP on both regular files and
+    // symlinks when AT_SYMLINK_NOFOLLOW is passed in.
+    match res {
+        Ok(_) => Ok(()),
+        Err(err) => {
+            if err.kind() == crate::io::ErrorKind::Unsupported {
+                match open_and_set_permissions(p, perm) {
+                    Ok(_) => return Ok(()),
+                    Err(e) => {
+                        if e.kind() == crate::io::ErrorKind::FilesystemLoop {
+                            // When open is used with O_NOFOLLOW flag, if the trailing component of
+                            // a path is a symbolic link, it should fail with ELOOP error. Instead of
+                            // returning `FilesystemLoop`, this returns `Unsupported` to keep it consistent
+                            // with what `fchmodat` would return when chmoding a symlink using AT_SYMLINK_NOFOLLOW.
+                            return Err(err);
+                        }
+                        return Err(e);
+                    }
+                }
+            }
+
+            Err(err)
         }
-        all(target_os = "linux", not(any(target_os = "espidf", target_os = "horizon"))) => {
-            cvt_r(|| unsafe {
-                libc::fchmodat(libc::AT_FDCWD, p.as_ptr(), perm.mode, libc::AT_SYMLINK_NOFOLLOW)
-            })
-            .map(|_| ())
-        }
-        _ => cvt_r(|| unsafe { libc::fchmodat(libc::AT_FDCWD, p.as_ptr(), perm.mode, 0) }).map(|_| ()),
     }
 }
 

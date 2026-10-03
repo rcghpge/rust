@@ -21,7 +21,7 @@ use tracing::span;
 
 use crate::core::backend::CodegenBackendKind;
 use crate::core::build_steps::gcc::{Gcc, GccOutput, GccTargetPair};
-use crate::core::build_steps::llvm::{LlvmFromCi, prebuilt_llvm_output};
+use crate::core::build_steps::llvm::{LlvmFromCi, LlvmKind, prebuilt_llvm_output};
 use crate::core::build_steps::tool::{RustcPrivateCompilers, SourceType, copy_lld_artifacts};
 use crate::core::build_steps::{dist, llvm};
 use crate::core::builder::{
@@ -33,7 +33,7 @@ use crate::core::config::toml::target::DefaultLinuxLinkerOverride;
 use crate::core::config::{
     Allocator, CompilerBuiltins, DebuginfoLevel, LlvmLibunwind, RustcLto, TargetSelection,
 };
-use crate::core::session::{CLang, DependencyType, FileType, GitRepo, Mode};
+use crate::core::session::{CLang, DependencyType, FileType, Mode};
 use crate::utils::build_stamp;
 use crate::utils::build_stamp::BuildStamp;
 use crate::utils::exec::command;
@@ -439,15 +439,6 @@ fn copy_self_contained_objects(
             )
         });
 
-        // wasm32-wasip3 doesn't exist in wasi-libc yet, so instead use libs
-        // from the wasm32-wasip2 target. Once wasi-libc supports wasip3 this
-        // should be deleted and the native objects should be used.
-        let srcdir = if target == "wasm32-wasip3" {
-            assert!(!srcdir.exists(), "wasip3 support is in wasi-libc, this should be updated now");
-            builder.wasi_libdir(TargetSelection::from_user("wasm32-wasip2")).unwrap()
-        } else {
-            srcdir
-        };
         for &obj in &["libc.a", "crt1-command.o", "crt1-reactor.o"] {
             copy_and_stamp(
                 builder,
@@ -1220,9 +1211,10 @@ pub fn rustc_cargo(
     build_compiler: &Compiler,
     crates: &[String],
 ) {
+    let kind = cargo.kind();
     cargo
         .arg("--features")
-        .arg(builder.rustc_features(builder.kind, target, crates))
+        .arg(builder.rustc_features(kind, target, crates))
         .arg("--manifest-path")
         .arg(builder.src.join("compiler/rustc/Cargo.toml"));
 
@@ -1259,31 +1251,7 @@ pub fn rustc_cargo(
         cargo.rustflag("-Zdefault-visibility=protected");
     }
 
-    if is_lto_stage(build_compiler) {
-        match builder.config.rust_lto {
-            RustcLto::Thin | RustcLto::Fat => {
-                // Since using LTO for optimizing dylibs is currently experimental,
-                // we need to pass -Zdylib-lto.
-                cargo.rustflag("-Zdylib-lto");
-                // Cargo by default passes `-Cembed-bitcode=no` and doesn't pass `-Clto` when
-                // compiling dylibs (and their dependencies), even when LTO is enabled for the
-                // crate. Therefore, we need to override `-Clto` and `-Cembed-bitcode` here.
-                let lto_type = match builder.config.rust_lto {
-                    RustcLto::Thin => "thin",
-                    RustcLto::Fat => "fat",
-                    _ => unreachable!(),
-                };
-                cargo.rustflag(&format!("-Clto={lto_type}"));
-                cargo.rustflag("-Cembed-bitcode=yes");
-            }
-            RustcLto::ThinLocal => { /* Do nothing, this is the default */ }
-            RustcLto::Off => {
-                cargo.rustflag("-Clto=off");
-            }
-        }
-    } else if builder.config.rust_lto == RustcLto::Off {
-        cargo.rustflag("-Clto=off");
-    }
+    apply_dylib_lto(builder, build_compiler, cargo);
 
     // With LLD, we can use ICF (identical code folding) to reduce the executable size
     // of librustc_driver/rustc and to improve i-cache utilization.
@@ -1316,7 +1284,35 @@ pub fn rustc_cargo(
     rustc_cargo_env(builder, cargo, target);
 }
 
-pub fn rustc_cargo_env(builder: &Builder<'_>, cargo: &mut Cargo, target: TargetSelection) {
+fn apply_dylib_lto(builder: &Builder<'_>, build_compiler: &Compiler, cargo: &mut Cargo) {
+    if is_lto_stage(build_compiler) {
+        match builder.config.rust_lto {
+            RustcLto::Thin | RustcLto::Fat => {
+                // Since using LTO for optimizing dylibs is currently experimental,
+                // we need to pass -Zdylib-lto.
+                cargo.rustflag("-Zdylib-lto");
+                // Cargo by default passes `-Cembed-bitcode=no` and doesn't pass `-Clto` when
+                // compiling dylibs (and their dependencies), even when LTO is enabled for the
+                // crate. Therefore, we need to override `-Clto` and `-Cembed-bitcode` here.
+                let lto_type = match builder.config.rust_lto {
+                    RustcLto::Thin => "thin",
+                    RustcLto::Fat => "fat",
+                    _ => unreachable!(),
+                };
+                cargo.rustflag(&format!("-Clto={lto_type}"));
+                cargo.rustflag("-Cembed-bitcode=yes");
+            }
+            RustcLto::ThinLocal => { /* Do nothing, this is the default */ }
+            RustcLto::Off => {
+                cargo.rustflag("-Clto=off");
+            }
+        }
+    } else if builder.config.rust_lto == RustcLto::Off {
+        cargo.rustflag("-Clto=off");
+    }
+}
+
+fn rustc_cargo_env(builder: &Builder<'_>, cargo: &mut Cargo, target: TargetSelection) {
     // Set some configuration variables picked up by build scripts and
     // the compiler alike
     cargo
@@ -1385,18 +1381,29 @@ pub fn rustc_cargo_env(builder: &Builder<'_>, cargo: &mut Cargo, target: TargetS
     //   variables, requiring LLVM to have been built.
     // - For check builds, we want to avoid building LLVM if possible.
     // - Check builds and non-check builds should have the same environment if
-    //   possible, to avoid unnecessary rebuilds due to cache-busting.
+    //   possible, to avoid unnecessary rebuilds due to cache-busting (in the same stage).
     //
-    // Therefore we try to avoid building LLVM for check builds, but only if
-    // building LLVM would be expensive. If "building" LLVM is cheap
-    // (i.e. it's already built or is downloadable), we prefer to maintain a
-    // consistent environment between check and non-check builds.
+    // If we have either:
+    // - LLVM already locally built
+    // - download-ci-llvm enabled
+    // - LLVM provided externally through a llvm-config
+    //
+    // and we do a check-like build, we run rustc_llvm as normally, to maintain a
+    // consistent environment between check and non-check builds
+    //
+    // However, if neither from the above three bullet points is true, and we do a check-like build,
+    // we skip running rustc_llvm by setting the RUST_CHECK environment variable.
+    //
+    // Note that if download-ci-llvm is enabled, `prebuilt_llvm_output` will *eagerly* download
+    // LLVM from CI, thus making it locally available.
     if builder.config.llvm_enabled(target) {
         let building_llvm_is_expensive = prebuilt_llvm_output(builder, target).is_none();
 
-        let skip_llvm = (cargo.kind() == Kind::Check) && building_llvm_is_expensive;
-        if !skip_llvm {
-            rustc_llvm_env(builder, cargo, target)
+        let skip_llvm = cargo.kind().is_check_like() && building_llvm_is_expensive;
+        if skip_llvm {
+            cargo.env("RUST_CHECK", "1");
+        } else {
+            rustc_llvm_env(builder, cargo, target);
         }
     }
 
@@ -1419,7 +1426,7 @@ pub fn rustc_cargo_env(builder: &Builder<'_>, cargo: &mut Cargo, target: TargetS
 /// Pass down configuration from the LLVM build into the build of
 /// rustc_llvm and rustc_codegen_llvm.
 ///
-/// Note that this has the side-effect of _building LLVM_, which is sometimes
+/// Note that calling this function has the side-effect of _building LLVM_, which is sometimes
 /// unwanted (e.g. for check builds).
 fn rustc_llvm_env(builder: &Builder<'_>, cargo: &mut Cargo, target: TargetSelection) {
     let llvm_output = builder.ensure(llvm::Llvm { target });
@@ -1717,7 +1724,7 @@ impl CommandLineStep for GccCodegenBackend {
             Kind::Build,
         );
         cargo.arg("--manifest-path").arg(builder.src.join("compiler/rustc_codegen_gcc/Cargo.toml"));
-        rustc_cargo_env(builder, &mut cargo, host);
+        apply_dylib_lto(builder, &build_compiler, &mut cargo);
 
         let _guard =
             builder.msg(Kind::Build, "codegen backend gcc", Mode::Codegen, build_compiler, host);
@@ -1788,7 +1795,7 @@ impl CommandLineStep for CraneliftCodegenBackend {
         cargo
             .arg("--manifest-path")
             .arg(builder.src.join("compiler/rustc_codegen_cranelift/Cargo.toml"));
-        rustc_cargo_env(builder, &mut cargo, target);
+        apply_dylib_lto(builder, &build_compiler, &mut cargo);
 
         let _guard = builder.msg(
             Kind::Build,
@@ -1902,7 +1909,7 @@ pub fn compiler_file(
     }
     let mut cmd = command(compiler);
     cmd.args(builder.cc_handled_cflags(target, c));
-    cmd.args(builder.cc_unhandled_cflags(target, GitRepo::Rustc, c));
+    cmd.args(builder.cc_unhandled_cflags(target, c));
     cmd.arg(format!("-print-file-name={file}"));
     let out = cmd.run_capture_stdout(builder).stdout();
     PathBuf::from(out.trim())
@@ -2189,10 +2196,17 @@ impl CommandLineStep for Assemble {
                     let tool_exe = exe(tool, target_compiler.host);
                     let src_path = llvm_bin_dir.join(&tool_exe);
 
-                    // When using `download-ci-llvm`, some of the tools may not exist, so skip trying to copy them.
-                    if !src_path.exists() && builder.config.llvm_ci_mode.download_from_ci() {
-                        eprintln!("{} does not exist; skipping copy", src_path.display());
-                        continue;
+                    if !src_path.exists() {
+                        // When using `download-ci-llvm`, some of the tools may not exist, so skip trying to copy them.
+                        if llvm_output.kind() == LlvmKind::DownloadedFromCi {
+                            eprintln!("{} does not exist; skipping copy", src_path.display());
+                            continue;
+                        }
+                        // On older LLVM versions, llubi isn't in the default tools. Remove this
+                        // code when LLVM 23 is the minimum version.
+                        if *tool == "llubi" {
+                            continue;
+                        }
                     }
 
                     // There is a chance that these tools are being installed from an external LLVM.
@@ -2512,7 +2526,8 @@ impl CommandLineStep for Assemble {
         }
 
         // In addition to `rust-lld` also install `wasm-component-ld` when
-        // is enabled. This is used by the `wasm32-wasip2` target of Rust.
+        // is enabled. This is used by targets that produce WebAssembly
+        // components in Rust such as `wasm32-wasip{2,3}`.
         if builder.tool_enabled("wasm-component-ld") {
             let wasm_component = builder.ensure(
                 crate::core::build_steps::tool::WasmComponentLd::for_use_by_compiler(
@@ -2660,7 +2675,7 @@ pub fn run_cargo(
         let (filenames_vec, crate_types) = match msg {
             CargoMessage::CompilerArtifact {
                 filenames,
-                target: CargoTarget { crate_types },
+                target: CargoTarget { crate_types, .. },
                 ..
             } => {
                 let mut f: Vec<String> = filenames.into_iter().map(|s| s.into_owned()).collect();
@@ -2867,12 +2882,14 @@ pub fn stream_cargo(
     status.success()
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 pub struct CargoTarget<'a> {
-    crate_types: Vec<Cow<'a, str>>,
+    pub crate_types: Vec<Cow<'a, str>>,
+    #[serde(default)]
+    pub doc: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 #[serde(tag = "reason", rename_all = "kebab-case")]
 pub enum CargoMessage<'a> {
     CompilerArtifact { filenames: Vec<Cow<'a, str>>, target: CargoTarget<'a> },

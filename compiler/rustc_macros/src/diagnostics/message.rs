@@ -133,6 +133,7 @@ const ALLOWED_CAPITALIZED_WORDS: &[&str] = &[
     "Cargo",
     "Ferris",
     "GCC",
+    "LLVM",
     "MIR",
     "NaNs",
     "OK",
@@ -170,6 +171,9 @@ fn verify_message_formatting(attr_span: Span, msg_span: Span, message: &str) {
 
     for line in message.lines().skip(1) {
         if line.is_empty() {
+            continue;
+        }
+        if line.trim().starts_with("{") && line.contains(&"found ") {
             continue;
         }
         let indent = line.chars().take_while(|c| *c == ' ').count();

@@ -16,14 +16,13 @@ use tracing::debug;
 use crate::inherent::*;
 use crate::lang_items::SolverTraitLangItem;
 use crate::region_constraint::RegionConstraint;
-use crate::search_graph::PathKind;
 use crate::{
-    self as ty, Canonical, CanonicalVarValues, CantBeErased, ConstVid, FloatVid, GenericArgKind,
-    InferConst, IntVid, Interner, TermKind, TyVid, TypingMode, Upcast,
+    self as ty, Canonical, CanonicalVarValues, CantBeErased, Const, ConstVid, FloatVid,
+    GenericArgKind, InferConst, IntVid, Interner, TermKind, TyVid, TypingMode, Upcast,
 };
 
-pub type CanonicalInput<I, T = <I as Interner>::Predicate> =
-    ty::CanonicalQueryInput<I, QueryInput<I, T>>;
+pub type CanonicalInputData<I> =
+    ty::CanonicalQueryInput<I, QueryInput<I, <I as Interner>::Predicate>>;
 pub type CanonicalResponse<I> = Canonical<I, Response<I>>;
 /// The result of evaluating a canonical query.
 ///
@@ -411,22 +410,15 @@ impl<I: Interner, P> Goal<I, P> {
 
 /// Why a specific goal has to be proven.
 ///
-/// This is necessary as we treat nested goals different depending on
-/// their source. This is used to decide whether a cycle is coinductive.
-/// See the documentation of `EvalCtxt::step_kind_for_source` for more details
-/// about this.
+/// This is used by proof tree visitors, especially for diagnostics purposes.
 ///
-/// It is also used by proof tree visitors, e.g. for diagnostics purposes.
+/// FIXME(-Znext-solver=coinductive): This will also matter in the future when
+/// deciding whether a step in a cycle is coinductive. We're currently still
+/// matching the old solver behavior here for now, so the `GoalSource` is ignored.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "nightly", derive(StableHash))]
 pub enum GoalSource {
     Misc,
-    /// A nested goal required to prove that types are equal/subtypes.
-    /// This is always an unproductive step.
-    ///
-    /// This is also used for all `NormalizesTo` goals as we they are used
-    /// to relate types in `AliasRelate`.
-    TypeRelating,
     /// We're proving a where-bound of an impl.
     ImplWhereBound,
     /// Const conditions that need to hold for `[const]` alias bounds to hold.
@@ -438,12 +430,8 @@ pub enum GoalSource {
     /// 2. for rigid projections's trait goal,
     /// 3. for GAT where clauses.
     AliasWellFormed,
-    /// In case normalizing aliases in nested goals cycles, eagerly normalizing these
-    /// aliases in the context of the parent may incorrectly change the cycle kind.
-    /// Normalizing aliases in goals therefore tracks the original path kind for this
-    /// nested goal. See the comment of the `ReplaceAliasWithInfer` visitor for more
-    /// details.
-    NormalizeGoal(PathKind),
+    /// Normalizing happens in the current context and is unproductive by itself.
+    Normalization,
 }
 
 #[derive_where(Clone, Hash, PartialEq, Debug; I: Interner, Goal<I, P>)]
@@ -577,10 +565,12 @@ pub enum BuiltinImplSource {
     /// unless more specific information is necessary.
     Misc,
     /// A built-in impl for trait objects. The index is only used in winnowing.
+    // FIXME(-Znext-solver=no): The new solver does not need this index, remove!
     Object(usize),
     /// A built-in implementation of `Upcast` for trait objects to other trait objects.
     ///
     /// The index is only used for winnowing.
+    // FIXME(-Znext-solver=no): The new solver does not need this index, remove!
     TraitUpcasting(usize),
 }
 
@@ -1088,7 +1078,7 @@ impl TyOrConstInferVar {
 
     /// Tries to extract an inference variable from a constant, returns `None`
     /// for constants other than `ty::ConstKind::Infer(_)` (or `InferConst::Fresh`).
-    fn maybe_from_const<I: Interner>(ct: I::Const) -> Option<Self> {
+    fn maybe_from_const<I: Interner>(ct: Const<I>) -> Option<Self> {
         match ct.kind() {
             ty::ConstKind::Infer(InferConst::Var(v)) => Some(TyOrConstInferVar::Const(v)),
             _ => None,

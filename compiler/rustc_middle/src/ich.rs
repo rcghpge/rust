@@ -5,10 +5,11 @@ use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::stable_hash::{
     RawDefId, RawSpan, StableHash, StableHashControls, StableHashCtxt, StableHasher,
 };
+use rustc_data_structures::sync::AppendOnlyIndexVec;
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_session::Session;
 use rustc_span::source_map::SourceMap;
-use rustc_span::{CachingSourceMapView, DUMMY_SP, Pos, Span};
+use rustc_span::{BytePos, CachingSourceMapView, DUMMY_SP, Pos, Span, SpanData};
 
 // Very often, we are hashing something that does not need the `CachingSourceMapView`, so we
 // initialize it lazily.
@@ -28,6 +29,7 @@ pub struct StableHashState<'a> {
     incremental_ignore_spans: bool,
     caching_source_map: CachingSourceMap<'a>,
     stable_hash_controls: StableHashControls,
+    source_span_cache: SourceSpanCache,
 }
 
 impl<'a> StableHashState<'a> {
@@ -40,6 +42,7 @@ impl<'a> StableHashState<'a> {
             incremental_ignore_spans: sess.opts.unstable_opts.incremental_ignore_spans,
             caching_source_map: CachingSourceMap::Unused(sess.source_map()),
             stable_hash_controls: StableHashControls { hash_spans: hash_spans_initial },
+            source_span_cache: SourceSpanCache::default(),
         }
     }
 
@@ -60,11 +63,6 @@ impl<'a> StableHashState<'a> {
                 self.source_map() // this recursive call will hit the `InUse` case
             }
         }
-    }
-
-    #[inline]
-    fn def_span(&self, def_id: LocalDefId) -> Span {
-        self.untracked.source_span.get(def_id).unwrap_or(DUMMY_SP)
     }
 
     #[inline]
@@ -91,6 +89,20 @@ impl<'a> StableHashCtxt for StableHashState<'a> {
         const TAG_INVALID_SPAN: u8 = 1;
         const TAG_RELATIVE_SPAN: u8 = 2;
 
+        #[inline]
+        fn pack_span_location(
+            line_lo: usize,
+            col_lo: BytePos,
+            line_hi: usize,
+            col_hi: BytePos,
+        ) -> u64 {
+            let col_lo_trunc = (col_lo.0 as u64) & 0xFF;
+            let line_lo_trunc = ((line_lo as u64) & 0xFF_FF_FF) << 8;
+            let col_hi_trunc = ((col_hi.0 as u64) & 0xFF) << 32;
+            let line_hi_trunc = ((line_hi as u64) & 0xFF_FF_FF) << 40;
+            col_lo_trunc | line_lo_trunc | col_hi_trunc | line_hi_trunc
+        }
+
         if !self.stable_hash_controls().hash_spans {
             return;
         }
@@ -105,7 +117,9 @@ impl<'a> StableHashCtxt for StableHashState<'a> {
             return;
         }
 
-        let parent = span.parent.map(|parent| self.def_span(parent).data_untracked());
+        let parent = span
+            .parent
+            .map(|parent| self.source_span_cache.lookup(parent, &self.untracked.source_span));
         if let Some(parent) = parent
             && parent.contains(span)
         {
@@ -149,11 +163,7 @@ impl<'a> StableHashCtxt for StableHashState<'a> {
         // issue #74890). A similar analysis applies if some query depends specifically on the
         // length of the span, but we only hash the end location. So hash both.
 
-        let col_lo_trunc = (col_lo.0 as u64) & 0xFF;
-        let line_lo_trunc = ((line_lo as u64) & 0xFF_FF_FF) << 8;
-        let col_hi_trunc = (col_hi.0 as u64) & 0xFF << 32;
-        let line_hi_trunc = ((line_hi as u64) & 0xFF_FF_FF) << 40;
-        let col_line = col_lo_trunc | line_lo_trunc | col_hi_trunc | line_hi_trunc;
+        let col_line = pack_span_location(line_lo, col_lo, line_hi, col_hi);
         let len = (span.hi - span.lo).0;
         Hash::hash(&col_line, hasher);
         Hash::hash(&len, hasher);
@@ -195,5 +205,33 @@ impl<'a> StableHashCtxt for StableHashState<'a> {
     #[inline]
     fn stable_hash_controls(&self) -> StableHashControls {
         self.stable_hash_controls
+    }
+}
+
+/// A single-entry cache for a `SpanData`, to optimize a particular scenario: when iterating
+/// through child spans (e.g. during encoding/decoding/hashing), many of those spans will have the
+/// same parent span. In the case where that parent span is interned (e.g. the parent is a const
+/// literal item exceeding MAX_LEN bytes of source code), this cache avoids having to fetch the
+/// parent's `SpanData` from the interner (which involves TLS, locking, etc.) over and over. A
+/// single entry is enough for an extremely high hit rate.
+#[derive(Default)]
+pub(crate) struct SourceSpanCache(Option<(LocalDefId, SpanData)>);
+
+impl SourceSpanCache {
+    #[inline]
+    pub(crate) fn lookup(
+        &mut self,
+        def_id: LocalDefId,
+        source_span: &AppendOnlyIndexVec<LocalDefId, Span>,
+    ) -> SpanData {
+        if let Some(cache) = self.0
+            && cache.0 == def_id
+        {
+            cache.1
+        } else {
+            let span_data = source_span.get(def_id).unwrap_or(DUMMY_SP).data_untracked();
+            self.0 = Some((def_id, span_data));
+            span_data
+        }
     }
 }

@@ -3,8 +3,7 @@ use rustc_middle::ty::layout::TyAndLayout;
 use rustc_middle::ty::{
     AdtDef, AdtKind, Const, ConstKind, GenericArgKind, GenericArgs, Region, Ty, VariantDef,
 };
-use rustc_middle::{bug, span_bug};
-use rustc_span::sym;
+use rustc_span::{bug, span_bug, sym};
 
 use crate::const_eval::CompileTimeMachine;
 use crate::interpret::{
@@ -127,7 +126,7 @@ impl<'tcx> InterpCx<'tcx, CompileTimeMachine<'tcx>> {
 
             match field.name {
                 sym::generics => self.write_generics(&field_place, generics)?,
-                sym::variants => {
+                sym::type_id_variants => {
                     self.allocate_fill_and_write_slice_ptr(
                         &field_place,
                         enum_def.variants().len() as u64,

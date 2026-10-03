@@ -518,7 +518,7 @@ macro_rules! make_mir_visitor {
                 terminator: &$($mutability)? Terminator<'tcx>,
                 location: Location
             ) {
-                let Terminator { source_info, kind, attributes: _ } = terminator;
+                let Terminator { source_info, kind, loop_hint_attrs: _ } = terminator;
 
                 self.visit_source_info(source_info);
                 match kind {
@@ -918,7 +918,7 @@ macro_rules! make_mir_visitor {
                 }) = composite {
                     self.visit_ty($(& $mutability)? *ty, TyContext::Location(location));
                     for elem in projection {
-                        let ProjectionElem::Field(_, ty) = elem else { bug!() };
+                        let ProjectionElem::Field(_, ty) = elem else { rustc_span::bug!() };
                         self.visit_ty($(& $mutability)? *ty, TyContext::Location(location));
                     }
                 }
@@ -1179,6 +1179,7 @@ macro_rules! visit_place_fns {
                     if ty != new_ty { Some(PlaceElem::UnwrapUnsafeBinder(new_ty)) } else { None }
                 }
                 PlaceElem::Deref
+                | PlaceElem::PhantomDeref
                 | PlaceElem::ConstantIndex { .. }
                 | PlaceElem::Subslice { .. }
                 | PlaceElem::Downcast(..) => None,
@@ -1263,6 +1264,7 @@ macro_rules! visit_place_fns {
                     );
                 }
                 ProjectionElem::Deref
+                | ProjectionElem::PhantomDeref
                 | ProjectionElem::Subslice { from: _, to: _, from_end: _ }
                 | ProjectionElem::ConstantIndex { offset: _, min_length: _, from_end: _ }
                 | ProjectionElem::Downcast(_, _) => {}

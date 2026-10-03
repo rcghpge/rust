@@ -8,13 +8,13 @@ pub(crate) mod gpu_offload;
 
 use libc::{c_char, c_uint};
 use rustc_abi::{self as abi, Align, CanonAbi, Size, WrappingRange};
+use rustc_attr_ir::{AttributeKind, UnrollAttr};
 use rustc_codegen_ssa::MemFlags;
 use rustc_codegen_ssa::common::{IntPredicate, RealPredicate, SynchronizationScope, TypeKind};
 use rustc_codegen_ssa::mir::operand::{OperandRef, OperandValue};
 use rustc_codegen_ssa::mir::place::PlaceRef;
 use rustc_codegen_ssa::traits::*;
 use rustc_data_structures::small_c_str::SmallCStr;
-use rustc_hir::attrs::{AttributeKind, UnrollAttr};
 use rustc_hir::def_id::DefId;
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrs;
 use rustc_middle::ty::layout::{
@@ -340,14 +340,14 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         }
     }
 
-    fn br_with_attrs(&mut self, dest: &'ll BasicBlock, attributes: &[AttributeKind]) {
+    fn br_with_attrs(&mut self, dest: &'ll BasicBlock, loop_hint_attrs: &[AttributeKind]) {
         unsafe {
             let val = llvm::LLVMBuildBr(self.llbuilder, dest);
 
             let mut nodes = Vec::new();
 
-            for attribute in attributes {
-                let AttributeKind::Unroll(unroll) = attribute else {
+            for loop_hint_attr in loop_hint_attrs {
+                let AttributeKind::Unroll(unroll) = loop_hint_attr else {
                     continue;
                 };
                 // UnrollAttr::Count needs a second operand, the provided count, but the other
@@ -454,15 +454,25 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         fn_attrs: Option<&CodegenFnAttrs>,
         fn_abi: Option<&FnAbi<'tcx, Ty<'tcx>>>,
         llfn: &'ll Value,
+        return_slot: ReturnSlot<&'ll Value>,
         args: &[&'ll Value],
         then: &'ll BasicBlock,
         catch: &'ll BasicBlock,
         funclet: Option<&Funclet<'ll>>,
         instance: Option<Instance<'tcx>>,
     ) -> &'ll Value {
+        // If this function returns indirectly (`PassMode::Indirect`),
+        // the `return_slot` should be the first argument.
+        let args = match return_slot {
+            ReturnSlot::Direct => args.to_vec(),
+            ReturnSlot::Indirect(sret_ptr) => {
+                let mut args = args.to_vec();
+                args.insert(0, sret_ptr);
+                args
+            }
+        };
         debug!("invoke {:?} with args ({:?})", llfn, args);
-
-        let args = self.check_call("invoke", llty, llfn, args);
+        let args = self.check_call("invoke", llty, llfn, &args);
         let funclet_bundle = funclet.map(|funclet| funclet.bundle());
         let mut bundles: SmallVec<[_; 2]> = SmallVec::new();
         if let Some(funclet_bundle) = funclet_bundle {
@@ -1463,13 +1473,23 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         caller_attrs: Option<&CodegenFnAttrs>,
         fn_abi: Option<&FnAbi<'tcx, Ty<'tcx>>>,
         llfn: &'ll Value,
+        return_slot: ReturnSlot<&'ll Value>,
         args: &[&'ll Value],
         funclet: Option<&Funclet<'ll>>,
         callee_instance: Option<Instance<'tcx>>,
     ) -> &'ll Value {
+        // If this function returns indirectly (`PassMode::Indirect`),
+        // the `return_slot` should be the first argument.
+        let args = match return_slot {
+            ReturnSlot::Direct => args.to_vec(),
+            ReturnSlot::Indirect(sret_ptr) => {
+                let mut args = args.to_vec();
+                args.insert(0, sret_ptr);
+                args
+            }
+        };
         debug!("call {:?} with args ({:?})", llfn, args);
-
-        let args = self.check_call("call", llty, llfn, args);
+        let args = self.check_call("call", llty, llfn, &args);
         let funclet_bundle = funclet.map(|funclet| funclet.bundle());
         let mut bundles: SmallVec<[_; 2]> = SmallVec::new();
         if let Some(funclet_bundle) = funclet_bundle {
@@ -1503,21 +1523,6 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
             )
         };
 
-        if let Some(callee_instance) = callee_instance {
-            // Attributes on the function definition being called
-            let callee_attrs = self.cx.tcx.codegen_fn_attrs(callee_instance.def_id());
-
-            if let Some(inlining_rule) =
-                attributes::inline_attr(&self.cx, self.cx.tcx, callee_instance, callee_attrs)
-            {
-                attributes::apply_to_callsite(
-                    call,
-                    llvm::AttributePlace::Function,
-                    &[inlining_rule],
-                );
-            }
-        }
-
         if let Some(fn_abi) = fn_abi {
             fn_abi.apply_attrs_callsite(self, call);
         }
@@ -1530,12 +1535,21 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         caller_attrs: Option<&CodegenFnAttrs>,
         fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
         llfn: Self::Value,
+        return_slot: ReturnSlot<Self::Value>,
         args: &[Self::Value],
         funclet: Option<&Self::Funclet>,
         callee_instance: Option<Instance<'tcx>>,
     ) {
-        let call =
-            self.call(llty, caller_attrs, Some(fn_abi), llfn, args, funclet, callee_instance);
+        let call = self.call(
+            llty,
+            caller_attrs,
+            Some(fn_abi),
+            llfn,
+            return_slot,
+            args,
+            funclet,
+            callee_instance,
+        );
         llvm::LLVMSetTailCallKind(call, llvm::TailCallKind::MustTail);
 
         match &fn_abi.ret.mode {
@@ -1875,7 +1889,8 @@ impl<'a, 'll, 'tcx> Builder<'a, 'll, 'tcx> {
         args: &[&'ll Value],
     ) -> &'ll Value {
         let (ty, f) = self.cx.get_intrinsic(base_name.into(), type_params);
-        self.call(ty, None, None, f, args, None, None)
+        // No LLVM intrinsic returns its data indirectly (via `sret`).
+        self.call(ty, None, None, f, ReturnSlot::Direct, args, None, None)
     }
 
     fn call_lifetime_intrinsic(&mut self, intrinsic: &'static str, ptr: &'ll Value, size: Size) {
@@ -1961,7 +1976,7 @@ impl<'a, 'll, 'tcx> Builder<'a, 'll, 'tcx> {
 
         // Emit KCFI operand bundle
         let kcfi_bundle = self.kcfi_operand_bundle(fn_attrs, fn_abi, instance, llfn);
-        if let Some(kcfi_bundle) = kcfi_bundle.as_ref().map(|b| b.as_ref()) {
+        if let Some(kcfi_bundle) = kcfi_bundle.as_ref().map(|bundle| bundle.as_ref()) {
             bundles.push(kcfi_bundle);
         }
 
@@ -2009,6 +2024,9 @@ impl<'a, 'll, 'tcx> Builder<'a, 'll, 'tcx> {
             {
                 return;
             }
+            if crate::llvm::HasStringAttribute(self.llfn(), "no-sanitize-cfi") {
+                return;
+            }
 
             let mut options = cfi::TypeIdOptions::empty();
             if self.tcx.sess.is_sanitizer_cfi_generalize_pointers_enabled() {
@@ -2016,6 +2034,10 @@ impl<'a, 'll, 'tcx> Builder<'a, 'll, 'tcx> {
             }
             if self.tcx.sess.is_sanitizer_cfi_normalize_integers_enabled() {
                 options.insert(cfi::TypeIdOptions::NORMALIZE_INTEGERS);
+            }
+
+            if self.cx.is_sanitizer_type_ignored(c"cfi", fn_abi) {
+                return;
             }
 
             let typeid = if let Some(instance) = instance {
@@ -2043,17 +2065,24 @@ impl<'a, 'll, 'tcx> Builder<'a, 'll, 'tcx> {
             let is_diag = self.tcx.sess.opts.unstable_opts.sanitizer_cfi_diag.unwrap_or(false);
             let is_recover =
                 self.tcx.sess.opts.unstable_opts.sanitizer_cfi_recover.unwrap_or(false);
+            let is_minimal =
+                self.tcx.sess.opts.unstable_opts.sanitizer_cfi_minimal_runtime.unwrap_or(false);
 
             if is_diag || is_recover {
-                let fty = self.cx.type_func(
-                    &[self.cx.type_ptr(), self.cx.type_isize(), self.cx.type_isize()],
-                    self.cx.type_void(),
-                );
+                let fty = if is_minimal {
+                    self.cx.type_func(&[], self.cx.type_void())
+                } else {
+                    self.cx.type_func(
+                        &[self.cx.type_ptr(), self.cx.type_isize(), self.cx.type_isize()],
+                        self.cx.type_void(),
+                    )
+                };
                 let ubsan_handler = self.declare_cfn(
-                    if is_recover {
-                        "__ubsan_handle_cfi_check_fail"
-                    } else {
-                        "__ubsan_handle_cfi_check_fail_abort"
+                    match (is_minimal, is_recover) {
+                        (true, true) => "__ubsan_handle_cfi_check_fail_minimal",
+                        (true, false) => "__ubsan_handle_cfi_check_fail_minimal_abort",
+                        (false, true) => "__ubsan_handle_cfi_check_fail",
+                        (false, false) => "__ubsan_handle_cfi_check_fail_abort",
                     },
                     llvm::UnnamedAddr::Global,
                     fty,
@@ -2079,12 +2108,18 @@ impl<'a, 'll, 'tcx> Builder<'a, 'll, 'tcx> {
                     self.generate_ubsan_cfi_diag_data(self.span, expected_ty, check_kind);
 
                 let function_address = self.ptrtoint(llfn, self.cx.type_isize());
+                let arguments: &[_] = if is_minimal {
+                    &[]
+                } else {
+                    &[diag_data, function_address, self.const_usize(0)]
+                };
                 self.call(
                     fty,
                     None,
                     None,
                     ubsan_handler,
-                    &[diag_data, function_address, self.const_usize(0)],
+                    ReturnSlot::Direct,
+                    arguments,
                     None,
                     None,
                 );
@@ -2123,6 +2158,9 @@ impl<'a, 'll, 'tcx> Builder<'a, 'll, 'tcx> {
             {
                 return None;
             }
+            if crate::llvm::HasStringAttribute(self.llfn(), "no-sanitize-kcfi") {
+                return None;
+            }
 
             let mut options = kcfi::TypeIdOptions::empty();
             if self.tcx.sess.is_sanitizer_cfi_generalize_pointers_enabled() {
@@ -2130,6 +2168,10 @@ impl<'a, 'll, 'tcx> Builder<'a, 'll, 'tcx> {
             }
             if self.tcx.sess.is_sanitizer_cfi_normalize_integers_enabled() {
                 options.insert(kcfi::TypeIdOptions::NORMALIZE_INTEGERS);
+            }
+
+            if self.cx.is_sanitizer_type_ignored(c"kcfi", fn_abi) {
+                return None;
             }
 
             let kcfi_typeid = if let Some(instance) = instance {

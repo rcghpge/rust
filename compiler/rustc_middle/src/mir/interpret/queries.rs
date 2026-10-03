@@ -1,7 +1,7 @@
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::DefId;
 use rustc_lint_defs::builtin::CONST_EVALUATABLE_UNCHECKED;
-use rustc_span::{DUMMY_SP, Span};
+use rustc_span::{DUMMY_SP, Span, bug};
 use tracing::{debug, instrument};
 
 use super::{
@@ -104,8 +104,11 @@ impl<'tcx> TyCtxt<'tcx> {
         }
 
         let def_id = match ct.kind {
+            ty::AliasConstKind::InherentSelf { .. } => {
+                bug!("got AliasConstKind::InherentSelf in const_eval_resolve_for_typeck")
+            }
             ty::AliasConstKind::Projection { def_id }
-            | ty::AliasConstKind::Inherent { def_id }
+            | ty::AliasConstKind::InherentImpl { def_id }
             | ty::AliasConstKind::Free { def_id }
             | ty::AliasConstKind::Anon { def_id } => def_id,
         };

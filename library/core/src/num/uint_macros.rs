@@ -526,8 +526,6 @@ macro_rules! uint_impl {
         /// # Examples
         ///
         /// ```
-        /// #![feature(funnel_shifts)]
-        ///
         #[doc = concat!("let a = ", $rot_op, "_", stringify!($SelfT), ";")]
         #[doc = concat!("let b = ", $fsh_op, "_", stringify!($SelfT), ";")]
         ///
@@ -547,10 +545,8 @@ macro_rules! uint_impl {
         /// rotating by an unbounded amount like [`rotate_left`](Self::rotate_left) does:
         ///
         /// ```should_panic
-        /// #![feature(funnel_shifts)]
         /// # #![feature(cfg_overflow_checks)]
         /// # #[cfg(overflow_checks)] {
-        ///
         #[doc = concat!("let a = ", stringify!($SelfT), "::MAX;")]
         /// // Okay
         #[doc = concat!("let _ = a.rotate_left(", stringify!($SelfT), "::BITS);")]
@@ -559,8 +555,8 @@ macro_rules! uint_impl {
         /// # }
         /// # #[cfg(not(overflow_checks))] panic!("fulfill should_panic");
         /// ```
-        #[rustc_const_unstable(feature = "funnel_shifts", issue = "145686")]
-        #[unstable(feature = "funnel_shifts", issue = "145686")]
+        #[rustc_const_stable(feature = "funnel_shifts", since = "CURRENT_RUSTC_VERSION")]
+        #[stable(feature = "funnel_shifts", since = "CURRENT_RUSTC_VERSION")]
         #[must_use = "this returns the result of the operation, without modifying the original"]
         #[inline(always)]
         #[rustc_inherit_overflow_checks]
@@ -597,8 +593,6 @@ macro_rules! uint_impl {
         /// # Examples
         ///
         /// ```
-        /// #![feature(funnel_shifts)]
-        ///
         #[doc = concat!("let a = ", $rot_op, "_", stringify!($SelfT), ";")]
         #[doc = concat!("let b = ", $fsh_op, "_", stringify!($SelfT), ";")]
         ///
@@ -618,10 +612,8 @@ macro_rules! uint_impl {
         /// rotating by an unbounded amount like [`rotate_right`](Self::rotate_right) does:
         ///
         /// ```should_panic
-        /// #![feature(funnel_shifts)]
         /// # #![feature(cfg_overflow_checks)]
         /// # #[cfg(overflow_checks)] {
-        ///
         #[doc = concat!("let a = ", stringify!($SelfT), "::MAX;")]
         /// // Okay
         #[doc = concat!("let _ = a.rotate_right(", stringify!($SelfT), "::BITS);")]
@@ -630,8 +622,8 @@ macro_rules! uint_impl {
         /// # }
         /// # #[cfg(not(overflow_checks))] panic!("fulfill should_panic");
         /// ```
-        #[rustc_const_unstable(feature = "funnel_shifts", issue = "145686")]
-        #[unstable(feature = "funnel_shifts", issue = "145686")]
+        #[rustc_const_stable(feature = "funnel_shifts", since = "CURRENT_RUSTC_VERSION")]
+        #[stable(feature = "funnel_shifts", since = "CURRENT_RUSTC_VERSION")]
         #[must_use = "this returns the result of the operation, without modifying the original"]
         #[inline(always)]
         #[rustc_inherit_overflow_checks]
@@ -654,8 +646,9 @@ macro_rules! uint_impl {
         #[doc = concat!("`", stringify!($SelfT) , "::BITS`,")]
         /// i.e. when [`funnel_shl`](Self::funnel_shl) would panic.
         ///
-        #[rustc_const_unstable(feature = "funnel_shifts", issue = "145686")]
-        #[unstable(feature = "funnel_shifts", issue = "145686")]
+        #[rustc_const_stable(feature = "funnel_shifts", since = "CURRENT_RUSTC_VERSION")]
+        #[stable(feature = "funnel_shifts", since = "CURRENT_RUSTC_VERSION")]
+        #[rustc_allow_const_fn_unstable(const_trait_impl)]
         #[must_use = "this returns the result of the operation, without modifying the original"]
         #[inline(always)]
         #[track_caller]
@@ -680,8 +673,9 @@ macro_rules! uint_impl {
         #[doc = concat!("`", stringify!($SelfT) , "::BITS`,")]
         /// i.e. when [`funnel_shr`](Self::funnel_shr) would panic.
         ///
-        #[rustc_const_unstable(feature = "funnel_shifts", issue = "145686")]
-        #[unstable(feature = "funnel_shifts", issue = "145686")]
+        #[rustc_const_stable(feature = "funnel_shifts", since = "CURRENT_RUSTC_VERSION")]
+        #[stable(feature = "funnel_shifts", since = "CURRENT_RUSTC_VERSION")]
+        #[rustc_allow_const_fn_unstable(const_trait_impl)]
         #[must_use = "this returns the result of the operation, without modifying the original"]
         #[inline(always)]
         #[track_caller]
@@ -3922,28 +3916,6 @@ macro_rules! uint_impl {
             self.count_ones() == 1
         }
 
-        // Returns one less than next power of two.
-        // (For 8u8 next power of two is 8u8 and for 6u8 it is 8u8)
-        //
-        // 8u8.one_less_than_next_power_of_two() == 7
-        // 6u8.one_less_than_next_power_of_two() == 7
-        //
-        // This method cannot overflow, as in the `next_power_of_two`
-        // overflow cases it instead ends up returning the maximum value
-        // of the type, and can return 0 for 0.
-        #[inline]
-        const fn one_less_than_next_power_of_two(self) -> Self {
-            if self <= 1 { return 0; }
-
-            let p = self - 1;
-            // SAFETY: Because `p > 0`, it cannot consist entirely of leading zeros.
-            // That means the shift is always in-bounds, and some processors
-            // (such as intel pre-haswell) have more efficient ctlz
-            // intrinsics when the argument is non-zero.
-            let z = unsafe { intrinsics::ctlz_nonzero(p) };
-            <$SelfT>::MAX >> z
-        }
-
         /// Returns the smallest power of two greater than or equal to `self`.
         ///
         /// When return value overflows (i.e., `self > (1 << (N-1))` for type
@@ -3964,7 +3936,15 @@ macro_rules! uint_impl {
         #[inline]
         #[rustc_inherit_overflow_checks]
         pub const fn next_power_of_two(self) -> Self {
-            self.one_less_than_next_power_of_two() + 1
+            if let Some(npot) = self.checked_next_power_of_two() {
+                npot
+            } else {
+                #[expect(arithmetic_overflow)]
+                {
+                    // Zero but in a way that panics in debug
+                    Self::MAX + 1
+                }
+            }
         }
 
         /// Returns the smallest power of two greater than or equal to `self`. If
@@ -3984,7 +3964,13 @@ macro_rules! uint_impl {
         #[must_use = "this returns the result of the operation, \
                       without modifying the original"]
         pub const fn checked_next_power_of_two(self) -> Option<Self> {
-            self.one_less_than_next_power_of_two().checked_add(1)
+            let m1 = self.saturating_sub(1);
+            if m1.cast_signed() >= 0 {
+                let exp = m1.bit_width();
+                Some(1 << exp)
+            } else {
+                None
+            }
         }
 
         /// Returns the smallest power of two greater than or equal to `n`. If
@@ -4003,10 +3989,11 @@ macro_rules! uint_impl {
         #[inline]
         #[unstable(feature = "wrapping_next_power_of_two", issue = "32463",
                    reason = "needs decision on wrapping behavior")]
+        #[rustc_const_unstable(feature = "wrapping_next_power_of_two", issue = "32463")]
         #[must_use = "this returns the result of the operation, \
                       without modifying the original"]
         pub const fn wrapping_next_power_of_two(self) -> Self {
-            self.one_less_than_next_power_of_two().wrapping_add(1)
+            self.checked_next_power_of_two().unwrap_or(0)
         }
 
         /// Returns the memory representation of this integer as a byte array in

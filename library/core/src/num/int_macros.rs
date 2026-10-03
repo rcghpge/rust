@@ -2140,6 +2140,7 @@ macro_rules! int_impl {
         #[must_use = "this returns the result of the operation, \
                       without modifying the original"]
         #[inline]
+        #[track_caller]
         pub const fn saturating_div(self, rhs: Self) -> Self {
             match self.overflowing_div(rhs) {
                 (result, false) => result,
@@ -2283,6 +2284,7 @@ macro_rules! int_impl {
         #[must_use = "this returns the result of the operation, \
                       without modifying the original"]
         #[inline]
+        #[track_caller]
         pub const fn wrapping_div(self, rhs: Self) -> Self {
             self.overflowing_div(rhs).0
         }
@@ -2309,6 +2311,7 @@ macro_rules! int_impl {
         #[must_use = "this returns the result of the operation, \
                       without modifying the original"]
         #[inline]
+        #[track_caller]
         pub const fn wrapping_div_euclid(self, rhs: Self) -> Self {
             self.overflowing_div_euclid(rhs).0
         }
@@ -2335,6 +2338,7 @@ macro_rules! int_impl {
         #[must_use = "this returns the result of the operation, \
                       without modifying the original"]
         #[inline]
+        #[track_caller]
         pub const fn wrapping_rem(self, rhs: Self) -> Self {
             self.overflowing_rem(rhs).0
         }
@@ -2360,6 +2364,7 @@ macro_rules! int_impl {
         #[must_use = "this returns the result of the operation, \
                       without modifying the original"]
         #[inline]
+        #[track_caller]
         pub const fn wrapping_rem_euclid(self, rhs: Self) -> Self {
             self.overflowing_rem_euclid(rhs).0
         }
@@ -2480,7 +2485,6 @@ macro_rules! int_impl {
         #[rustc_const_stable(feature = "const_int_methods", since = "1.32.0")]
         #[must_use = "this returns the result of the operation, \
                       without modifying the original"]
-        #[allow(unused_attributes)]
         #[inline]
         pub const fn wrapping_abs(self) -> Self {
              if self.is_negative() {
@@ -2856,6 +2860,7 @@ macro_rules! int_impl {
         #[rustc_const_stable(feature = "const_overflowing_int_methods", since = "1.52.0")]
         #[must_use = "this returns the result of the operation, \
                       without modifying the original"]
+        #[track_caller]
         pub const fn overflowing_div(self, rhs: Self) -> (Self, bool) {
             // Using `&` helps LLVM see that it is the same check made in division.
             if intrinsics::unlikely((self == Self::MIN) & (rhs == -1)) {
@@ -2885,6 +2890,7 @@ macro_rules! int_impl {
         #[rustc_const_stable(feature = "const_euclidean_int_methods", since = "1.52.0")]
         #[must_use = "this returns the result of the operation, \
                       without modifying the original"]
+        #[track_caller]
         pub const fn overflowing_div_euclid(self, rhs: Self) -> (Self, bool) {
             // Using `&` helps LLVM see that it is the same check made in division.
             if intrinsics::unlikely((self == Self::MIN) & (rhs == -1)) {
@@ -2914,6 +2920,7 @@ macro_rules! int_impl {
         #[rustc_const_stable(feature = "const_overflowing_int_methods", since = "1.52.0")]
         #[must_use = "this returns the result of the operation, \
                       without modifying the original"]
+        #[track_caller]
         pub const fn overflowing_rem(self, rhs: Self) -> (Self, bool) {
             if intrinsics::unlikely(rhs == -1) {
                 (0, self == Self::MIN)
@@ -2970,7 +2977,6 @@ macro_rules! int_impl {
         #[rustc_const_stable(feature = "const_int_methods", since = "1.32.0")]
         #[must_use = "this returns the result of the operation, \
                       without modifying the original"]
-        #[allow(unused_attributes)]
         pub const fn overflowing_neg(self) -> (Self, bool) {
             if intrinsics::unlikely(self == Self::MIN) {
                 (Self::MIN, true)
@@ -3622,7 +3628,6 @@ macro_rules! int_impl {
         /// ```
         #[stable(feature = "rust1", since = "1.0.0")]
         #[rustc_const_stable(feature = "const_int_methods", since = "1.32.0")]
-        #[allow(unused_attributes)]
         #[must_use = "this returns the result of the operation, \
                       without modifying the original"]
         #[inline]
@@ -3956,14 +3961,15 @@ macro_rules! int_impl {
         /// ```
         /// #![feature(clamp_magnitude)]
         #[doc = concat!("assert_eq!(120", stringify!($SelfT), ".clamp_magnitude(100), 100);")]
-        #[doc = concat!("assert_eq!(-120", stringify!($SelfT), ".clamp_magnitude(100), -100);")]
+        #[doc = concat!("assert_eq!((-120", stringify!($SelfT), ").clamp_magnitude(100), -100);")]
         #[doc = concat!("assert_eq!(80", stringify!($SelfT), ".clamp_magnitude(100), 80);")]
-        #[doc = concat!("assert_eq!(-80", stringify!($SelfT), ".clamp_magnitude(100), -80);")]
+        #[doc = concat!("assert_eq!((-80", stringify!($SelfT), ").clamp_magnitude(100), -80);")]
         /// ```
-        #[must_use = "this returns the clamped value and does not modify the original"]
-        #[unstable(feature = "clamp_magnitude", issue = "148519")]
         #[inline]
-        pub fn clamp_magnitude(self, limit: $UnsignedT) -> Self {
+        #[must_use = "method returns a new number and does not mutate the original value"]
+        #[rustc_const_unstable(feature = "const_cmp", issue = "143800")]
+        #[unstable(feature = "clamp_magnitude", issue = "148519")]
+        pub const fn clamp_magnitude(self, limit: $UnsignedT) -> Self {
             if let Ok(limit) = core::convert::TryInto::<$SelfT>::try_into(limit) {
                 self.clamp(-limit, limit)
             } else {

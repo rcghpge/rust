@@ -49,6 +49,13 @@ use crate::sys::{AsInner, AsInnerMut, FromInner, IntoInner, fs as fs_imp};
 use crate::time::SystemTime;
 use crate::{error, fmt};
 
+pub(crate) mod dirs;
+
+#[unstable(feature = "fs_home_dirs", issue = "162082")]
+pub use self::dirs::HomeDirs;
+#[unstable(feature = "fs_media_dirs", issue = "162083")]
+pub use self::dirs::MediaDirs;
+
 /// An object providing access to an open file on the filesystem.
 ///
 /// An instance of a `File` can be read and/or written depending on what options
@@ -1637,6 +1644,8 @@ impl Dir {
 
     /// Queries metadata about the underlying directory.
     ///
+    /// This is equivalent to `dir.metadata(".")` but can be more efficient.
+    ///
     /// # Examples
     ///
     /// ```no_run
@@ -1645,13 +1654,13 @@ impl Dir {
     ///
     /// fn main() -> std::io::Result<()> {
     ///     let dir = Dir::open("foo")?;
-    ///     let metadata = dir.metadata()?;
+    ///     let metadata = dir.self_metadata()?;
     ///     Ok(())
     /// }
     /// ```
     #[unstable(feature = "dirfd", issue = "120426")]
-    pub fn metadata(&self) -> io::Result<Metadata> {
-        self.inner.metadata().map(Metadata)
+    pub fn self_metadata(&self) -> io::Result<Metadata> {
+        self.inner.self_metadata().map(Metadata)
     }
 
     /// Attempts to open a file in read-only mode relative to this directory.
@@ -1868,6 +1877,76 @@ impl Dir {
     #[unstable(feature = "dirfd", issue = "120426")]
     pub fn remove_dir<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
         self.inner.remove_dir(path.as_ref())
+    }
+
+    /// Creates a new `Dir` instance that shares the same underlying directory handle
+    /// as the existing `Dir` instance.
+    ///
+    /// # Examples
+    ///
+    /// Creates two handles for a directory named `foo`:
+    ///
+    /// ```no_run
+    /// #![feature(dirfd)]
+    /// use std::fs::Dir;
+    ///
+    /// fn main() -> std::io::Result<()> {
+    ///     let dir = Dir::open("foo")?;
+    ///     let dir_copy = dir.try_clone()?;
+    ///     Ok(())
+    /// }
+    /// ```
+    #[unstable(feature = "dirfd", issue = "120426")]
+    pub fn try_clone(&self) -> io::Result<Self> {
+        Ok(Dir { inner: self.inner.duplicate()? })
+    }
+
+    /// Queries the file system to get information about a file, directory, etc. relative to this
+    /// directory.
+    ///
+    /// This function will traverse symbolic links to query information about the destination file.
+    /// To query metadata about the path itself without following symbolic links, use
+    /// [`symlink_metadata`][Self::symlink_metadata].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// #![feature(dirfd)]
+    /// use std::fs::Dir;
+    ///
+    /// fn main() -> std::io::Result<()> {
+    ///     let dir = Dir::open("foo")?;
+    ///     let metadata = dir.metadata("subdir/file.txt")?;
+    ///     Ok(())
+    /// }
+    /// ```
+    #[unstable(feature = "dirfd", issue = "120426")]
+    pub fn metadata<P: AsRef<Path>>(&self, path: P) -> io::Result<Metadata> {
+        self.inner.metadata(path.as_ref()).map(Metadata)
+    }
+
+    /// Queries the file system to get information about a file, directory, etc. relative to this
+    /// directory.
+    ///
+    /// This function will return the [`Metadata`] of the exact path without traversing symbolic
+    /// links to a resolved destination file. Using this function on a path that is a file or
+    /// directory (not a symbolic link) will behave the same as [`metadata`][Self::metadata].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// #![feature(dirfd)]
+    /// use std::fs::Dir;
+    ///
+    /// fn main() -> std::io::Result<()> {
+    ///     let dir = Dir::open("foo")?;
+    ///     let metadata = dir.symlink_metadata("subdir/file.txt")?;
+    ///     Ok(())
+    /// }
+    /// ```
+    #[unstable(feature = "dirfd", issue = "120426")]
+    pub fn symlink_metadata<P: AsRef<Path>>(&self, path: P) -> io::Result<Metadata> {
+        self.inner.symlink_metadata(path.as_ref()).map(Metadata)
     }
 }
 
@@ -3620,21 +3699,21 @@ pub fn set_permissions<P: AsRef<Path>>(path: P, perm: Permissions) -> io::Result
 ///
 /// # Platform-specific behavior
 ///
-/// This function currently corresponds to:
-/// * `open` with `O_NOFOLLOW` flag enabled + `fchmod` on WASI
-/// * `fchmodat` function with the flag `AT_SYMLINK_NOFOLLOW` enabled
-///   on Unix platforms
-/// * The flag `FILE_FLAG_OPEN_REPARSE_POINT` is enabled and then the
-///   permissions of the file is set through `SetFileInformationByHandle`
-///   on Windows.
-/// * On all other platforms, the behavior remains the same with
-/// [`fs::set_permissions`].
-///
-/// [`fs::set_permissions`]: crate::fs::set_permissions
+/// This function currently corresponds to the following underlying operations:
+/// * Android: returns [`Unsupported`] on all files.
+/// * Linux, BSD-based platforms, QNX, NTO: `fchmodat` with `AT_SYMLINK_NOFOLLOW`.
+/// If that is not supported, we fall back to:
+///   * Unix-based platforms with symlinks: `open` with `O_NOFOLLOW` followed by
+///   [`fs::set_permissions`].
+///   * Unix-based platforms without symlinks: `open` followed by [`fs::set_permissions`].
+/// * Windows: `CreateFileW` with `FILE_FLAG_OPEN_REPARSE_POINT` followed
+///   by `SetFileInformationByHandle`.
 ///
 /// Note that, this [may change in the future][changes].
 ///
 /// [changes]: io#platform-specific-behavior
+///
+/// [`fs::set_permissions`]: crate::fs::set_permissions
 ///
 /// # Errors
 ///
@@ -3644,10 +3723,8 @@ pub fn set_permissions<P: AsRef<Path>>(path: P, perm: Permissions) -> io::Result
 /// * `path` does not exist.
 /// * The user lacks the permission to change attributes of the file.
 ///
-/// Note: On Linux, this will result in a [`Unsupported`] error
-/// if the final element is a symlink. On BSD-based systems, the
-/// behavior can vary from symlink permission bits changing or
-/// there being no effects on symlinks
+/// Note: On Linux and other Unix-based platforms with symlinks (non-BSD-based),
+/// this will result in an [`Unsupported`] error if the final element is a symlink.
 ///
 /// [`Unsupported`]: crate::io::ErrorKind::Unsupported
 ///
@@ -3660,8 +3737,8 @@ pub fn set_permissions<P: AsRef<Path>>(path: P, perm: Permissions) -> io::Result
 /// fn main() -> std::io::Result<()> {
 ///     let mut perms = fs::symlink_metadata("foo.txt")?.permissions();
 ///     perms.set_readonly(true);
-///     // This should result in an error on certain platforms
-///     // or succeed in modifying the permissions of a symlink
+///     // This should result in an error on certain platforms or
+///     // succeed in modifying the permissions of a symlink
 ///     fs::set_permissions_nofollow("foo.txt", perms)?;
 ///     Ok(())
 /// }

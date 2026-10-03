@@ -29,7 +29,6 @@ use rustc_data_structures::stable_hash::{StableHash, StableHashCtxt, StableHashe
 use rustc_data_structures::tagged_ptr::Tag;
 use rustc_macros::{Decodable, Encodable, StableHash, Walkable};
 pub use rustc_span::AttrId;
-use rustc_span::def_id::LocalDefId;
 use rustc_span::{
     ByteSymbol, DUMMY_SP, ErrorGuaranteed, Ident, LocalExpnId, Span, Spanned, Symbol, kw, respan,
     sym,
@@ -256,7 +255,7 @@ impl PathSegment {
 pub enum GenericArgs {
     /// The `<'a, A, B, C>` in `foo::bar::baz::<'a, A, B, C>`.
     AngleBracketed(AngleBracketedArgs),
-    /// The `(A, B)` and `C` in `Foo(A, B) -> C`.
+    /// The `(A, B)` and `C` in `Foo(A, B) -> C`, used for the `Fn` trait among others.
     Parenthesized(ParenthesizedArgs),
     /// `(..)` in return type notation.
     ParenthesizedElided(Span),
@@ -293,6 +292,14 @@ impl GenericArg {
             GenericArg::Lifetime(lt) => lt.ident.span,
             GenericArg::Type(ty) => ty.span,
             GenericArg::Const(ct) => ct.value.span,
+        }
+    }
+
+    pub fn is_maybe_parenthesised_infer(&self) -> bool {
+        match self {
+            GenericArg::Lifetime(lt) => lt.ident.name == kw::UnderscoreLifetime,
+            GenericArg::Type(ty) => ty.is_maybe_parenthesised_infer(),
+            GenericArg::Const(_) => false,
         }
     }
 }
@@ -644,8 +651,8 @@ impl Pat {
             PatKind::MacCall(mac) => TyKind::MacCall(mac.clone()),
             // `&mut? P` can be reinterpreted as `&mut? T` where `T` is `P` reparsed as a type.
             PatKind::Ref(pat, pinned, mutbl) => pat.to_ty().map(|ty| match pinned {
-                Pinnedness::Not => TyKind::Ref(None, MutTy { ty, mutbl: *mutbl }),
-                Pinnedness::Pinned => TyKind::PinnedRef(None, MutTy { ty, mutbl: *mutbl }),
+                Pinnedness::Not => TyKind::Ref(None, ty, *mutbl),
+                Pinnedness::Pinned => TyKind::PinnedRef(None, ty, *mutbl),
             })?,
             // A slice/array pattern `[P]` can be reparsed as `[T]`, an unsized array,
             // when `P` can be reparsed as a type `T`.
@@ -1500,7 +1507,7 @@ impl Expr {
             ExprKind::Paren(expr) => expr.to_ty().map(TyKind::Paren)?,
 
             ExprKind::AddrOf(BorrowKind::Ref, mutbl, expr) => {
-                expr.to_ty().map(|ty| TyKind::Ref(None, MutTy { ty, mutbl: *mutbl }))?
+                expr.to_ty().map(|ty| TyKind::Ref(None, ty, *mutbl))?
             }
 
             ExprKind::Repeat(expr, expr_len) => {
@@ -1616,7 +1623,7 @@ impl Expr {
             | ExprKind::UnsafeBinderCast(..)
             | ExprKind::While(..)
             | ExprKind::Yield(YieldKind::Postfix(..))
-            | ExprKind::DirectConstArg(..)
+            | ExprKind::GcaMacro(..)
             | ExprKind::Err(_)
             | ExprKind::Dummy => prefix_attrs_precedence(&self.attrs),
         }
@@ -1913,8 +1920,8 @@ pub enum ExprKind {
 
     UnsafeBinderCast(UnsafeBinderCastKind, Box<Expr>, Option<Box<Ty>>),
 
-    /// An mGCA `direct_const_arg!()` expression.
-    DirectConstArg(Box<Expr>),
+    /// An mGCA `gca!()` expression.
+    GcaMacro(Box<Expr>),
 
     /// Placeholder for an expression that wasn't syntactically well formed in some way.
     Err(ErrorGuaranteed),
@@ -2329,14 +2336,6 @@ impl LitKind {
     }
 }
 
-// N.B., If you change this, you'll probably want to change the corresponding
-// type structure in `middle/ty.rs` as well.
-#[derive(Clone, Encodable, Decodable, Debug, Walkable)]
-pub struct MutTy {
-    pub ty: Box<Ty>,
-    pub mutbl: Mutability,
-}
-
 /// Represents a function's signature in a trait declaration,
 /// trait implementation, or free function.
 #[derive(Clone, Encodable, Decodable, Debug)]
@@ -2395,7 +2394,7 @@ pub struct BorrowedFnSig<'a> {
 /// * the `G<Ty> = Ty` in `Trait<G<Ty> = Ty>`
 /// * the `A: Bound` in `Trait<A: Bound>`
 /// * the `RetTy` in `Trait(ArgTy, ArgTy) -> RetTy`
-/// * the `C = { Ct }` in `Trait<C = { Ct }>` (feature `min_generic_const_args`)
+/// * the `C = { Ct }` in `Trait<C = { Ct }>` (feature `gca_min_const_items`)
 /// * the `f(..): Bound` in `Trait<f(..): Bound>` (feature `return_type_notation`)
 #[derive(Clone, Encodable, Decodable, Debug, Walkable)]
 pub struct AssocItemConstraint {
@@ -2463,8 +2462,7 @@ impl From<Box<Ty>> for Ty {
 impl Ty {
     pub fn peel_refs(&self) -> &Self {
         let mut final_ty = self;
-        while let TyKind::Ref(_, MutTy { ty, .. }) | TyKind::Ptr(MutTy { ty, .. }) = &final_ty.kind
-        {
+        while let TyKind::Ref(_, ty, _) | TyKind::Ptr(ty, ..) = &final_ty.kind {
             final_ty = ty;
         }
         final_ty
@@ -2521,13 +2519,13 @@ pub enum TyKind {
     /// A fixed length array (`[T; n]`).
     Array(Box<Ty>, AnonConst),
     /// A raw pointer (`*const T` or `*mut T`).
-    Ptr(MutTy),
+    Ptr(Box<Ty>, Mutability),
     /// A reference (`&'a T` or `&'a mut T`).
-    Ref(#[visitable(extra = LifetimeCtxt::Ref)] Option<Lifetime>, MutTy),
+    Ref(#[visitable(extra = LifetimeCtxt::Ref)] Option<Lifetime>, Box<Ty>, Mutability),
     /// A pinned reference (`&'a pin const T` or `&'a pin mut T`).
     ///
     /// Desugars into `Pin<&'a T>` or `Pin<&'a mut T>`.
-    PinnedRef(#[visitable(extra = LifetimeCtxt::Ref)] Option<Lifetime>, MutTy),
+    PinnedRef(#[visitable(extra = LifetimeCtxt::Ref)] Option<Lifetime>, Box<Ty>, Mutability),
     /// A function pointer type (e.g., `fn(usize) -> bool`).
     FnPtr(Box<FnPtrTy>),
     /// An unsafe existential lifetime binder (e.g., `unsafe<'a> &'a ()`).
@@ -2572,8 +2570,8 @@ pub enum TyKind {
     FieldOf(Box<Ty>, Option<Ident>, Ident),
     /// A view of a type. `T.{ field_1, field_2 }`.
     View(Box<Ty>, #[visitable(ignore)] ThinVec<Ident>),
-    /// An mGCA `direct_const_arg!()` expression.
-    DirectConstArg(Box<Expr>),
+    /// An mGCA `gca!()` expression.
+    GcaMacro(Box<Expr>),
     /// Sometimes we need a dummy value when no error has occurred.
     Dummy,
     /// Placeholder for a kind that has failed to be defined.
@@ -2972,12 +2970,10 @@ impl Param {
             if ident.name == kw::SelfLower {
                 return match self.ty.kind {
                     TyKind::ImplicitSelf => Some(respan(self.pat.span, SelfKind::Value(mutbl))),
-                    TyKind::Ref(lt, MutTy { ref ty, mutbl }) if ty.kind.is_implicit_self() => {
+                    TyKind::Ref(lt, ref ty, mutbl) if ty.kind.is_implicit_self() => {
                         Some(respan(self.pat.span, SelfKind::Region(lt, mutbl)))
                     }
-                    TyKind::PinnedRef(lt, MutTy { ref ty, mutbl })
-                        if ty.kind.is_implicit_self() =>
-                    {
+                    TyKind::PinnedRef(lt, ref ty, mutbl) if ty.kind.is_implicit_self() => {
                         Some(respan(self.pat.span, SelfKind::Pinned(lt, mutbl)))
                     }
                     _ => Some(respan(
@@ -3009,17 +3005,13 @@ impl Param {
             SelfKind::Value(mutbl) => (mutbl, infer_ty),
             SelfKind::Region(lt, mutbl) => (
                 Mutability::Not,
-                Box::new(Ty {
-                    id: DUMMY_NODE_ID,
-                    kind: TyKind::Ref(lt, MutTy { ty: infer_ty, mutbl }),
-                    span,
-                }),
+                Box::new(Ty { id: DUMMY_NODE_ID, kind: TyKind::Ref(lt, infer_ty, mutbl), span }),
             ),
             SelfKind::Pinned(lt, mutbl) => (
                 Mutability::Not,
                 Box::new(Ty {
                     id: DUMMY_NODE_ID,
-                    kind: TyKind::PinnedRef(lt, MutTy { ty: infer_ty, mutbl }),
+                    kind: TyKind::PinnedRef(lt, infer_ty, mutbl),
                     span,
                 }),
             ),
@@ -3329,13 +3321,12 @@ pub enum UseTreeKind {
     /// use foo::{bar, baz};
     ///          ^^^^^^^^^^
     /// ```
-    Nested { items: ThinVec<(UseTree, NodeId)>, span: Span },
+    Nested { items: ThinVec<UseTreeAndId>, span: Span },
     /// `use prefix::*`
     Glob(Span),
 }
 
 /// A tree of paths sharing common prefixes.
-/// Used in `use` items both at top-level and inside of braces in import groups.
 #[derive(Clone, Encodable, Decodable, Debug, Walkable)]
 pub struct UseTree {
     pub prefix: Path,
@@ -3375,6 +3366,13 @@ impl UseTree {
             UseTreeKind::Glob(span) => span,
         }
     }
+}
+
+/// Used in nested `use` trees.
+#[derive(Clone, Encodable, Decodable, Debug, Walkable)]
+pub struct UseTreeAndId {
+    pub inner: UseTree,
+    pub id: NodeId,
 }
 
 /// Distinguishes between `Attribute`s that decorate items and Attributes that
@@ -4036,15 +4034,7 @@ pub struct ConstItem {
     pub generics: Generics,
     pub ty: Box<Ty>,
     pub body: Option<Box<Expr>>,
-    #[visitable(ignore)]
-    pub kind: ConstItemKind,
     pub define_opaque: Option<ThinVec<(NodeId, Path)>>,
-}
-
-#[derive(Clone, Copy, Encodable, Decodable, Debug, PartialEq, Eq)]
-pub enum ConstItemKind {
-    Body,
-    TypeConst,
 }
 
 #[derive(Clone, Encodable, Decodable, Debug, Walkable)]
@@ -4081,6 +4071,8 @@ pub struct TestBinderBody {
     pub foralls: ThinVec<TestBinderForall>,
     pub exists: ThinVec<TestBinderExists>,
     pub constraints: Vec<TestBinderConstraint>,
+    /// These are not where clauses, but rather predicates within the body to be proven
+    pub predicates: Vec<WhereClause>,
 }
 
 #[derive(Clone, Encodable, Decodable, Debug, Walkable)]
@@ -4114,11 +4106,24 @@ pub enum TestBinderConstraint {
         #[visitable(extra = LifetimeCtxt::Bound)]
         rhs: Lifetime,
     },
-    Type {
+    PlaceholderOutlives {
         lhs: Box<Ty>,
         #[visitable(extra = LifetimeCtxt::Bound)]
         rhs: Lifetime,
     },
+    AliasOutlives {
+        bound_type_constraint: TestBinderBoundTypeConstraint,
+    },
+}
+
+#[derive(Clone, Encodable, Decodable, Debug, Walkable)]
+pub struct TestBinderBoundTypeConstraint {
+    pub span: Span,
+    pub node_id: NodeId,
+    pub params: ThinVec<GenericParam>,
+    pub lhs: Box<Ty>,
+    #[visitable(extra = LifetimeCtxt::Bound)]
+    pub rhs: Lifetime,
 }
 
 // Adding a new variant? Please update `test_item` in `tests/ui/macros/stringify.rs`.
@@ -4445,24 +4450,6 @@ impl TryFrom<ItemKind> for ForeignItemKind {
 }
 
 pub type ForeignItem = Item<ForeignItemKind>;
-
-/// Fragment of the AST according to "HIR owner" semantics.
-///
-/// This is used to map each `LocalDefId` to its content's AST.
-#[derive(Debug)]
-pub enum AstOwner {
-    /// This definition does not correspond to a HIR owner.
-    NonOwner,
-    /// This definition corresponds to a nested `use` tree.
-    /// The `LocalDefId` points to its HIR owner.
-    NestedUseTree(LocalDefId),
-    Crate(Box<Crate>),
-    Item(Box<Item>),
-    TraitItem(Box<AssocItem>),
-    ImplItem(Box<AssocItem>),
-    ForeignItem(Box<ForeignItem>),
-}
-
 // Some nodes are used a lot. Make sure they don't unintentionally get bigger.
 #[cfg(target_pointer_width = "64")]
 mod size_asserts {

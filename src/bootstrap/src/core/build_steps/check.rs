@@ -5,8 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::core::backend::CodegenBackendKind;
 use crate::core::build_steps::compile::{
-    ArtifactKeepMode, add_to_sysroot, run_cargo, rustc_cargo, rustc_cargo_env, std_cargo,
-    std_crates_for_make_run,
+    ArtifactKeepMode, add_to_sysroot, run_cargo, rustc_cargo, std_cargo, std_crates_for_make_run,
 };
 use crate::core::build_steps::tool;
 use crate::core::build_steps::tool::{
@@ -386,6 +385,16 @@ impl CommandLineStep for Rustc {
         for krate in &*self.crates {
             cargo.arg("-p").arg(krate);
         }
+        // When we run `x check compiler --all-targets`, then the `Rustc` step is executed in
+        // two "modes" - one with all in-tree rustc crates, and a second time with empty crates
+        // in `PrepareRustcRmetaSysroot`, to prepare .rmeta files for RustcPrivate tools.
+        // If we use `--all-targets` for both, then we will end up with a duplicated .rmeta file
+        // in the sysroot, which breaks everything.
+        // So we only use `--all-targets` for the default case where crates are empty.
+        // This will also be used when someone does `x check compiler/<rustc-crate>`.
+        if !self.crates.is_empty() && builder.sess.config.cmd.check_all_targets() {
+            cargo.arg("--all-targets");
+        }
 
         let _guard = builder.msg(
             self.check_kind.to_kind(),
@@ -584,7 +593,6 @@ impl CommandLineStep for CraneliftCodegenBackend {
         cargo
             .arg("--manifest-path")
             .arg(builder.src.join("compiler/rustc_codegen_cranelift/Cargo.toml"));
-        rustc_cargo_env(builder, &mut cargo, target);
         self.build_compiler.configure_cargo(&mut cargo);
 
         let _guard = builder.msg(
@@ -667,7 +675,6 @@ impl CommandLineStep for GccCodegenBackend {
         );
 
         cargo.arg("--manifest-path").arg(builder.src.join("compiler/rustc_codegen_gcc/Cargo.toml"));
-        rustc_cargo_env(builder, &mut cargo, target);
         self.build_compiler.configure_cargo(&mut cargo);
 
         let _guard =

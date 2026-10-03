@@ -7,8 +7,8 @@ use clippy_utils::source::{SpanExt as _, snippet, snippet_with_context};
 use clippy_utils::ty::{get_iterator_item_ty, implements_trait, is_copy, peel_and_count_ty_refs};
 use clippy_utils::visitors::find_all_ret_expressions;
 use clippy_utils::{fn_def_id, get_parent_expr, is_expr_temporary_value, return_ty, sym};
+use rustc_attr_ir::lang_items::LangItem;
 use rustc_errors::Applicability;
-use rustc_hir::attrs::lang_items::LangItem;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::DefId;
 use rustc_hir::{BorrowKind, Expr, ExprKind, ItemKind, Node};
@@ -495,7 +495,6 @@ fn get_input_traits_and_projections<'tcx>(
     (trait_predicates, projection_predicates)
 }
 
-#[expect(clippy::too_many_lines)]
 fn can_change_type<'a>(cx: &LateContext<'a>, mut expr: &'a Expr<'a>, mut ty: Ty<'a>) -> bool {
     for (_, node) in cx.tcx.hir_parent_iter(expr.hir_id) {
         match node {

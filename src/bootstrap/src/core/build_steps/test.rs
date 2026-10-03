@@ -38,7 +38,7 @@ use crate::core::builder::{
 use crate::core::compiler::Compiler;
 use crate::core::config::TargetSelection;
 use crate::core::config::flags::{Subcommand, get_completion, top_level_help};
-use crate::core::session::{CLang, GitRepo, Mode};
+use crate::core::session::{CLang, Mode};
 use crate::core::{android, debuggers};
 use crate::utils::build_stamp::{self, BuildStamp};
 use crate::utils::exec::{BootstrapCommand, command};
@@ -48,7 +48,6 @@ use crate::utils::helpers::{
     target_supports_cranelift_backend, up_to_date,
 };
 use crate::utils::render_tests::{add_flags_and_try_run_tests, try_run_tests};
-
 mod compiletest;
 pub mod failed_tests;
 
@@ -2041,6 +2040,12 @@ test!(BuildStd {
     default: false
 });
 
+test!(AssemblyGcc {
+    path: "tests/assembly-gcc",
+    mode: CompiletestMode::Assembly,
+    suite: "assembly-gcc",
+    default: true
+});
 test!(AssemblyLlvm {
     path: "tests/assembly-llvm",
     mode: CompiletestMode::Assembly,
@@ -2836,9 +2841,9 @@ Please disable assertions with `rust.debug-assertions = false`.
         // requires that a C++ compiler was configured which isn't always the case.
         if !builder.config.dry_run() && mode == CompiletestMode::RunMake {
             let mut cflags = builder.cc_handled_cflags(target, CLang::C);
-            cflags.extend(builder.cc_unhandled_cflags(target, GitRepo::Rustc, CLang::C));
+            cflags.extend(builder.cc_unhandled_cflags(target, CLang::C));
             let mut cxxflags = builder.cc_handled_cflags(target, CLang::Cxx);
-            cxxflags.extend(builder.cc_unhandled_cflags(target, GitRepo::Rustc, CLang::Cxx));
+            cxxflags.extend(builder.cc_unhandled_cflags(target, CLang::Cxx));
             cmd.arg("--cc")
                 .arg(builder.cc(target))
                 .arg("--cxx")
@@ -3635,7 +3640,13 @@ impl CommandLineStep for Crate {
         if crates.iter().any(|crate_| crate_ == "alloc") {
             crates.push("alloctests".to_owned());
         };
-        let description = crate_description(&self.crates);
+        let mut description = crate_description(&self.crates);
+        if builder.kind == Kind::Miri {
+            if !description.is_empty() {
+                description.push(' ');
+            }
+            description.push_str("in Miri");
+        }
         run_cargo_test(cargo, &[], &crates, &*description, target, builder, record_failed_tests);
     }
 }
@@ -4418,7 +4429,6 @@ impl CommandLineStep for CodegenCranelift {
         cargo
             .arg("--manifest-path")
             .arg(builder.src.join("compiler/rustc_codegen_cranelift/build_system/Cargo.toml"));
-        compile::rustc_cargo_env(builder, &mut cargo, target);
 
         // Avoid incremental cache issues when changing rustc
         cargo.env("CARGO_BUILD_INCREMENTAL", "false");
@@ -4544,7 +4554,6 @@ impl CommandLineStep for CodegenGCC {
         cargo
             .arg("--manifest-path")
             .arg(builder.src.join("compiler/rustc_codegen_gcc/build_system/Cargo.toml"));
-        compile::rustc_cargo_env(builder, &mut cargo, target);
         add_cg_gcc_cargo_flags(&mut cargo, &gcc);
 
         // Avoid incremental cache issues when changing rustc

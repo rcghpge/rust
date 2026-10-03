@@ -15,6 +15,7 @@ use core::ops::{
 use core::str::{FromStr, Utf8Error};
 use core::{fmt, hash};
 
+use crate::alloc::Allocator;
 use crate::borrow::{Cow, ToOwned};
 use crate::boxed::Box;
 #[cfg(not(no_rc))]
@@ -274,7 +275,7 @@ impl<'a> From<&'a ByteString> for Cow<'a, ByteStr> {
 #[unstable(feature = "bstr", issue = "134915")]
 impl FromIterator<char> for ByteString {
     #[inline]
-    fn from_iter<T: IntoIterator<Item = char>>(iter: T) -> Self {
+    fn from_iter<I: IntoIterator<Item = char>>(iter: I) -> Self {
         ByteString(iter.into_iter().collect::<String>().into_bytes())
     }
 }
@@ -282,7 +283,7 @@ impl FromIterator<char> for ByteString {
 #[unstable(feature = "bstr", issue = "134915")]
 impl FromIterator<u8> for ByteString {
     #[inline]
-    fn from_iter<T: IntoIterator<Item = u8>>(iter: T) -> Self {
+    fn from_iter<I: IntoIterator<Item = u8>>(iter: I) -> Self {
         ByteString(iter.into_iter().collect())
     }
 }
@@ -290,7 +291,7 @@ impl FromIterator<u8> for ByteString {
 #[unstable(feature = "bstr", issue = "134915")]
 impl<'a> FromIterator<&'a str> for ByteString {
     #[inline]
-    fn from_iter<T: IntoIterator<Item = &'a str>>(iter: T) -> Self {
+    fn from_iter<I: IntoIterator<Item = &'a str>>(iter: I) -> Self {
         ByteString(iter.into_iter().collect::<String>().into_bytes())
     }
 }
@@ -298,7 +299,7 @@ impl<'a> FromIterator<&'a str> for ByteString {
 #[unstable(feature = "bstr", issue = "134915")]
 impl<'a> FromIterator<&'a [u8]> for ByteString {
     #[inline]
-    fn from_iter<T: IntoIterator<Item = &'a [u8]>>(iter: T) -> Self {
+    fn from_iter<I: IntoIterator<Item = &'a [u8]>>(iter: I) -> Self {
         let mut buf = Vec::new();
         for b in iter {
             buf.extend_from_slice(b);
@@ -310,7 +311,7 @@ impl<'a> FromIterator<&'a [u8]> for ByteString {
 #[unstable(feature = "bstr", issue = "134915")]
 impl<'a> FromIterator<&'a ByteStr> for ByteString {
     #[inline]
-    fn from_iter<T: IntoIterator<Item = &'a ByteStr>>(iter: T) -> Self {
+    fn from_iter<I: IntoIterator<Item = &'a ByteStr>>(iter: I) -> Self {
         let mut buf = Vec::new();
         for b in iter {
             buf.extend_from_slice(&b.0);
@@ -322,7 +323,7 @@ impl<'a> FromIterator<&'a ByteStr> for ByteString {
 #[unstable(feature = "bstr", issue = "134915")]
 impl FromIterator<ByteString> for ByteString {
     #[inline]
-    fn from_iter<T: IntoIterator<Item = ByteString>>(iter: T) -> Self {
+    fn from_iter<I: IntoIterator<Item = ByteString>>(iter: I) -> Self {
         let mut buf = Vec::new();
         for mut b in iter {
             buf.append(&mut b.0);
@@ -333,10 +334,10 @@ impl FromIterator<ByteString> for ByteString {
 
 #[unstable(feature = "bstr", issue = "134915")]
 impl FromStr for ByteString {
-    type Err = core::convert::Infallible;
+    type Err = !;
 
     #[inline]
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+    fn from_str(s: &str) -> Result<Self, !> {
         Ok(ByteString(s.as_bytes().to_vec()))
     }
 }
@@ -597,10 +598,10 @@ impl<'a> TryFrom<&'a ByteString> for &'a str {
 // Additional impls for `ByteStr` that require types from `alloc`:
 
 #[unstable(feature = "bstr", issue = "134915")]
-impl Clone for Box<ByteStr> {
+impl<A: Allocator + Clone> Clone for Box<ByteStr, A> {
     #[inline]
     fn clone(&self) -> Self {
-        Self::from(Box::<[u8]>::from(&self.0))
+        Box::clone_from_ref_in(&**self, Self::allocator(self).clone())
     }
 }
 

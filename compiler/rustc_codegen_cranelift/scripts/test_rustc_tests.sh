@@ -138,6 +138,7 @@ rm -r tests/run-make/panic-impl-transitive
 rm tests/ui/debuginfo/debuginfo-emit-llvm-ir-and-split-debuginfo.rs
 rm tests/ui/statics/issue-91050-1.rs
 rm tests/ui/statics/issue-91050-2.rs
+rm -r tests/run-make/locate-panic-runtime
 
 # giving different but possibly correct results
 # =============================================
@@ -157,11 +158,13 @@ rm -r tests/run-make/strip # same
 rm -r tests/run-make-cargo/compiler-builtins # Expects lib/rustlib/src/rust to contains the standard library source
 rm -r tests/run-make-cargo/panic-immediate-abort-works # same
 rm -r tests/run-make-cargo/panic-immediate-abort-codegen # same
+rm -r tests/run-make-cargo/panic-strategies # same
 rm -r tests/run-make/missing-unstable-trait-bound # This disables support for unstable features, but running cg_clif needs some unstable features
 rm -r tests/run-make/const-trait-stable-toolchain # same
 rm -r tests/run-make/print-request-help-stable-unstable # same
 rm -r tests/run-make/issue-149402-suggest-unresolve # same
 rm -r tests/run-make/const-destruct-stable-toolchain # same
+rm -r tests/run-make/unstable-target-feature # same
 rm -r tests/run-make/incr-add-rust-src-component
 rm tests/ui/errors/remap-path-prefix-sysroot.rs # different sysroot source path
 rm -r tests/run-make/export # something about rustc version mismatches
@@ -174,6 +177,7 @@ rm tests/ui/process/println-with-broken-pipe.rs # same
 rm -r tests/run-make/extern-fn-explicit-align # argument alignment not yet supported
 rm -r tests/run-make/panic-abort-eh_frame # .eh_frame emitted with panic=abort
 rm -r tests/run-make/used-proc-macro # doesn't work on arm64 for some reason
+rm tests/ui/async-await/async-drop/async-drop-async-gen-return-pending.rs # rustc side fnsig issue
 
 # bugs in the test suite
 # ======================

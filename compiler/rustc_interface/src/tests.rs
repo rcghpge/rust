@@ -21,7 +21,10 @@ use rustc_session::config::{
 };
 use rustc_session::search_paths::SearchPath;
 use rustc_session::utils::{CanonicalizedPath, NativeLib};
-use rustc_session::{CompilerIO, EarlyDiagCtxt, Session, build_session, getopts};
+use rustc_session::{
+    CodegenBackendInit, CompilerIO, EarlyDiagCtxt, Session, build_early_session, build_session,
+    getopts,
+};
 use rustc_span::edition::{DEFAULT_EDITION, Edition};
 use rustc_span::source_map::{RealFileLoader, SourceMapInputs};
 use rustc_span::{FileName, RealFileName, RemapPathScopeComponents, SourceFileHashAlgorithm, sym};
@@ -66,13 +69,13 @@ where
 
         static USING_INTERNAL_FEATURES: AtomicBool = AtomicBool::new(false);
 
+        let sess = build_early_session(sessopts, target, None);
         let sess = build_session(
-            sessopts,
+            sess,
+            CodegenBackendInit::default(),
             io,
             Default::default(),
-            target,
             "",
-            None,
             &USING_INTERNAL_FEATURES,
         );
         let cfg = parse_cfg(&sess, matches.opt_strs("cfg"));
@@ -848,6 +851,7 @@ fn test_unstable_options_tracking_hash() {
     tracked!(min_function_alignment, Some(Align::EIGHT));
     tracked!(min_recursion_limit, Some(256));
     tracked!(mir_enable_passes, vec![("DestProp".to_string(), false)]);
+    tracked!(mir_move_elimination, true);
     tracked!(mir_opt_level, Some(4));
     tracked!(mir_preserve_ub, true);
     tracked!(move_size_limit, Some(4096));
@@ -890,7 +894,6 @@ fn test_unstable_options_tracking_hash() {
     tracked!(sanitizer_kcfi_arity, Some(true));
     tracked!(sanitizer_memory_track_origins, 2);
     tracked!(sanitizer_recover, SanitizerSet::ADDRESS);
-    tracked!(saturating_float_casts, Some(true));
     tracked!(share_generics, Some(true));
     tracked!(simulate_remapped_rust_src_base, Some(PathBuf::from("/rustc/abc")));
     tracked!(small_data_threshold, Some(16));
