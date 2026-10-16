@@ -24,7 +24,6 @@ use rustc_infer::traits::ImplSource;
 use rustc_middle::middle::privacy::Level;
 use rustc_middle::traits::IsConstable;
 use rustc_middle::ty::adjustment::{Adjust, DerefAdjustKind};
-use rustc_middle::ty::consts::ConstExt;
 use rustc_middle::ty::error::TypeError;
 use rustc_middle::ty::print::{
     PrintPolyTraitClauseExt as _, PrintPolyTraitRefExt, PrintTraitClauseExt as _,
@@ -1271,7 +1270,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
             parenthesized_cast(span)
         } else if let Some(body) = self.tcx.hir_maybe_body_owned_by(obligation.cause.body_def_id) {
             let mut expr_finder = FindExprBySpan::new(span, self.tcx);
-            expr_finder.visit_expr(body.value);
+            expr_finder.visit_expr(&body.value);
             if let Some(expr) = expr_finder.result
                 && let hir::ExprKind::AddrOf(_, _, expr) = expr.kind
             {
@@ -1311,7 +1310,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
         let Some(body) = self.tcx.hir_maybe_body_owned_by(obligation.cause.body_def_id) else {
             return;
         };
-        expr_finder.visit_expr(body.value);
+        expr_finder.visit_expr(&body.value);
         let Some(expr) = expr_finder.result else {
             return;
         };
@@ -1641,7 +1640,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
         };
 
         let mut expr_finder = FindExprBySpan::new(obligation.cause.span, self.tcx);
-        expr_finder.visit_expr(body.value);
+        expr_finder.visit_expr(&body.value);
         let Some(expr) = expr_finder.result else {
             return true;
         };
@@ -2018,7 +2017,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                 return false;
             };
             let mut expr_finder = FindExprBySpan::new(span, self.tcx);
-            expr_finder.visit_expr(body.value);
+            expr_finder.visit_expr(&body.value);
 
             if let Some(ty) = expr_finder.ty_result {
                 if let hir::Node::Expr(expr) = self.tcx.parent_hir_node(ty.hir_id)
@@ -2243,7 +2242,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
         let Some(body) = self.tcx.hir_maybe_body_owned_by(obligation.cause.body_def_id) else {
             return false;
         };
-        expr_finder.visit_expr(body.value);
+        expr_finder.visit_expr(&body.value);
         let mut maybe_suggest = |suggested_ty, count, suggestions| {
             // Remapping bound vars here
             let trait_pred_and_suggested_ty =
@@ -2783,7 +2782,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
         };
         let body = self.tcx.hir_body(body_id);
         let mut expr_finder = FindExprBySpan::new(span, self.tcx);
-        expr_finder.visit_expr(body.value);
+        expr_finder.visit_expr(&body.value);
         let Some(expr) = expr_finder.result else {
             return;
         };
@@ -4031,6 +4030,13 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                                     && !bounds.iter()
                                         .filter_map(|bound| bound.trait_ref())
                                         .any(|tr| tr.trait_def_id().is_some_and(|def_id| tcx.is_lang_item(def_id, LangItem::Sized)))
+                                    // Only suggest relaxing the implicit `Sized` restriction if the
+                                    // failing obligation is that restriction. Relaxing it cannot
+                                    // satisfy an explicit where clause of the item, e.g.
+                                    // `type Assoc where Self: Sized;`.
+                                    && !generics.predicates.iter().any(|pred| {
+                                        pred.kind.in_where_clause() && pred.span.contains(span)
+                                    })
                                 {
                                     let (span, separator) = if let [.., last] = bounds {
                                         (last.span().shrink_to_hi(), " +")
@@ -4974,8 +4980,10 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                         .as_ref()
                         .and_then(|typeck| typeck.node_type_opt(expr.hir_id))
                     && let Some(pred) = predicate.as_clause()
-                    && let ty::ClauseKind::Trait(pred) = pred.kind().skip_binder()
-                    && self.can_eq(param_env, pred.self_ty(), expr_ty)
+                    && let Some(pred) = pred.as_trait_clause()
+                    && self
+                        .infcx
+                        .enter_forall(pred, |pred| self.can_eq(param_env, pred.self_ty(), expr_ty))
                 {
                     (expr_ty, expr)
                 } else {
@@ -5215,7 +5223,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                 && let Some(body) = self.tcx.hir_maybe_body_owned_by(obligation.cause.body_def_id)
                 && let Some(expr) = {
                     let mut finder = FindExprBySpan::new(span, self.tcx);
-                    finder.visit_expr(body.value);
+                    finder.visit_expr(&body.value);
                     finder.result
                 }
                 && let hir::ExprKind::AddrOf(hir::BorrowKind::Ref, hir::Mutability::Not, borrowed) =
@@ -5659,7 +5667,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                     {
                         expr
                     } else {
-                        body.value
+                        &body.value
                     };
                     if let hir::ExprKind::MethodCall(path_segment, rcvr, [], span) = expr.kind
                         && path_segment.ident.name == sym::clone
@@ -6337,8 +6345,10 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
         let Some(fn_def_id) = fn_def_id.as_local() else {
             // If it's not local, we can at least mention that the method is async, if it is.
             if self.tcx.asyncness(fn_def_id).is_async() {
+                let mut span: MultiSpan = self.tcx.def_span(fn_def_id).into();
+                span.push_span_context(self.tcx.def_span(self.tcx.parent(fn_def_id)));
                 err.span_note(
-                    self.tcx.def_span(fn_def_id),
+                    span,
                     format!(
                         "`{}::{}` is an `async fn` in trait, which does not \
                     automatically imply that its future is `{auto_trait}`",
@@ -6935,7 +6945,7 @@ impl<'v> Visitor<'v> for ReturnsVisitor<'v> {
         }
     }
 
-    fn visit_body(&mut self, body: &hir::Body<'v>) {
+    fn visit_body(&mut self, body: &'v hir::Body<'v>) {
         assert!(!self.in_block_tail);
         self.in_block_tail = true;
         hir::intravisit::walk_body(self, body);

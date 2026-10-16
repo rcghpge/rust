@@ -4,7 +4,6 @@ use crate::marker::{Destruct, PointeeSized, Unsize};
 use crate::mem::{MaybeUninit, SizedTypeProperties, transmute};
 use crate::num::NonZero;
 use crate::ops::{CoerceUnsized, DispatchFromDyn};
-use crate::ptr::Unique;
 use crate::slice::{self, SliceIndex};
 use crate::ub_checks::assert_unsafe_precondition;
 use crate::{fmt, hash, intrinsics, mem, ptr};
@@ -76,7 +75,7 @@ use crate::{fmt, hash, intrinsics, mem, ptr};
 #[repr(transparent)]
 #[rustc_nonnull_optimization_guaranteed]
 #[lang = "non_null"]
-pub struct NonNull<T: PointeeSized> {
+pub struct NonNull<#[rustc_assert_variance(covariant)] T: PointeeSized> {
     pointer: crate::pattern_type!(*const T is !null),
 }
 
@@ -522,7 +521,6 @@ impl<T: PointeeSized> NonNull<T> {
     /// # Examples
     ///
     /// ```rust
-    /// #![feature(pointer_try_cast_aligned)]
     /// use std::ptr::NonNull;
     ///
     /// let mut x = 0u64;
@@ -533,7 +531,7 @@ impl<T: PointeeSized> NonNull<T> {
     /// assert!(aligned.try_cast_aligned::<u32>().is_some());
     /// assert!(unaligned.try_cast_aligned::<u32>().is_none());
     /// ```
-    #[unstable(feature = "pointer_try_cast_aligned", issue = "141221")]
+    #[stable(feature = "pointer_try_cast_aligned", since = "CURRENT_RUSTC_VERSION")]
     #[must_use = "this returns the result of the operation, \
                   without modifying the original"]
     #[inline]
@@ -948,7 +946,8 @@ impl<T: PointeeSized> NonNull<T> {
     #[inline]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
     #[stable(feature = "non_null_convenience", since = "1.80.0")]
-    pub unsafe fn read_volatile(self) -> T
+    #[rustc_const_unstable(feature = "const_volatile", issue = "159094")]
+    pub const unsafe fn read_volatile(self) -> T
     where
         T: Sized,
     {
@@ -1122,7 +1121,8 @@ impl<T: PointeeSized> NonNull<T> {
     #[inline(always)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
     #[stable(feature = "non_null_convenience", since = "1.80.0")]
-    pub unsafe fn write_volatile(self, val: T)
+    #[rustc_const_unstable(feature = "const_volatile", issue = "159094")]
+    pub const unsafe fn write_volatile(self, val: T)
     where
         T: Sized,
     {
@@ -1687,15 +1687,6 @@ impl<T: PointeeSized> hash::Hash for NonNull<T> {
     #[inline]
     fn hash<H: hash::Hasher>(&self, state: &mut H) {
         self.as_ptr().hash(state)
-    }
-}
-
-#[unstable(feature = "ptr_internals", issue = "none")]
-#[rustc_const_unstable(feature = "const_convert", issue = "143773")]
-const impl<T: PointeeSized> From<Unique<T>> for NonNull<T> {
-    #[inline]
-    fn from(unique: Unique<T>) -> Self {
-        unique.as_non_null_ptr()
     }
 }
 

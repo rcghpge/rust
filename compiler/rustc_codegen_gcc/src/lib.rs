@@ -1,12 +1,10 @@
 /*
  * FIXME(antoyo): implement equality in libgccjit based on https://zpz.github.io/blog/overloading-equality-operator-in-cpp-class-hierarchy/ (for type equality?)
  * For Thin LTO, this might be helpful:
-// cspell:disable-next-line
  * In gcc 4.6 -fwhopr was removed and became default with -flto. The non-whopr path can still be executed via -flto-partition=none.
  * Or the new incremental LTO (https://www.phoronix.com/news/GCC-Incremental-LTO-Patches)?
  *
  * Maybe some missing optimizations enabled by rustc's LTO is in there: https://gcc.gnu.org/onlinedocs/gcc/Optimize-Options.html
-// cspell:disable-next-line
  * Like -fipa-icf (should be already enabled) and maybe -fdevirtualize-at-ltrans.
  * FIXME: disable debug info always being emitted. Perhaps this slows down things?
  *
@@ -155,6 +153,14 @@ impl GccCodegenBackend {
     fn config(&self) -> &BackendConfig {
         self.config.as_ref().expect("target info not initialized")
     }
+
+    #[cfg(feature = "master")]
+    fn set_personality_function(&self, tcx: TyCtxt<'_>) {
+        let personality_symbol = rustc_symbol_mangling::eh_personality_symbol(tcx);
+        gccjit::set_global_personality_function_name(
+            &CString::new(personality_symbol).expect("symbol name shouldn't contain NUL"),
+        );
+    }
 }
 
 fn load_libgccjit_if_needed(libgccjit_target_lib_file: &Path) {
@@ -237,8 +243,6 @@ impl CodegenBackend for GccCodegenBackend {
                 target_info: Arc::new(IntoDynSyncSend(context.get_target_info())),
                 lto_supported: gccjit::is_lto_supported(),
             });
-
-            gccjit::set_global_personality_function_name(c"rust_eh_personality");
         }
 
         #[cfg(not(feature = "master"))]
@@ -274,6 +278,8 @@ impl CodegenBackend for GccCodegenBackend {
     }
 
     fn codegen_crate(&self, tcx: TyCtxt<'_>) -> Box<dyn Any> {
+        #[cfg(feature = "master")]
+        self.set_personality_function(tcx);
         Box::new(codegen_crate(self.clone(), tcx))
     }
 
@@ -478,14 +484,12 @@ fn target_config(sess: &EarlySession, target_info: &SharedTargetInfo) -> TargetC
         |feature| {
             let gccjit_feature_name = to_gcc_target_info_feature(sess, feature);
             target_info.cpu_supports(gccjit_feature_name)
-            // cSpell:disable
             /*
               adx, aes, avx, avx2, avx512bf16, avx512bitalg, avx512bw, avx512cd, avx512dq, avx512er, avx512f, avx512fp16, avx512ifma,
               avx512pf, avx512vbmi, avx512vbmi2, avx512vl, avx512vnni, avx512vp2intersect, avx512vpopcntdq,
               bmi1, bmi2, cmpxchg16b, ermsb, f16c, fma, fxsr, gfni, lzcnt, movbe, pclmulqdq, popcnt, rdrand, rdseed, rtm,
               sha, sse, sse2, sse3, sse4.1, sse4.2, sse4a, ssse3, tbm, vaes, vpclmulqdq, xsave, xsavec, xsaveopt, xsaves
             */
-            // cSpell:enable
         },
     );
 

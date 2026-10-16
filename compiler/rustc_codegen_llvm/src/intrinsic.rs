@@ -19,10 +19,9 @@ use rustc_hir as hir;
 use rustc_hir::def_id::LOCAL_CRATE;
 use rustc_lint_defs::builtin::DEPRECATED_LLVM_INTRINSIC;
 use rustc_middle::mir::BinOp;
-use rustc_middle::ty::consts::ConstExt;
 use rustc_middle::ty::layout::{FnAbiOf, HasTyCtxt, HasTypingEnv, LayoutOf};
 use rustc_middle::ty::offload_meta::OffloadMetadata;
-use rustc_middle::ty::{self, GenericArgsRef, Instance, SimdAlign, Ty, TyCtxt, TypingEnv};
+use rustc_middle::ty::{self, GenericArgsRef, Instance, SimdAlign, Ty, TyCtxt};
 use rustc_session::diagnostics::feature_err;
 use rustc_span::{ErrorGuaranteed, Span, Symbol, bug, span_bug, sym};
 use rustc_structures::CrateType;
@@ -1886,7 +1885,7 @@ fn codegen_autodiff<'ll, 'tcx>(
     adjust_activity_to_abi(
         tcx,
         source_fn_ptr_ty,
-        TypingEnv::fully_monomorphized(),
+        bx.cx.typing_env(),
         &mut diff_attrs.input_activity,
     );
 
